@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>M3U8视频下载工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 28px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+        }
+        
+        input[type="text"],
+        input[type="password"],
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        input[type="text"]:focus,
+        input[type="password"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        button {
+            flex: 1;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .m3u8-list {
+            margin-top: 30px;
+            display: none;
+        }
+        
+        .m3u8-item {
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .m3u8-item:hover {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+        
+        .m3u8-item.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+        
+        .m3u8-item h3 {
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        
+        .m3u8-item .url {
+            color: #666;
+            font-size: 12px;
+            word-break: break-all;
+            margin-top: 5px;
+        }
+        
+        .download-form {
+            margin-top: 30px;
+            padding-top: 30px;
+            border-top: 2px solid #e0e0e0;
+            display: none;
+        }
+        
+        .download-form h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 20px;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
+            <h1 style="margin: 0;">🎬 M3U8视频下载工具</h1>
+            <a href="/downloads" style="padding: 10px 20px; background: #667eea; color: white; text-decoration: none; border-radius: 8px; font-weight: 500; transition: all 0.3s;" onmouseover="this.style.background='#5568d3'" onmouseout="this.style.background='#667eea'">下载管理</a>
+        </div>
+        
+        <div id="alertContainer"></div>
+        
+        <div class="form-group">
+            <label for="urlInput">输入网页地址：</label>
+            <input type="text" id="urlInput" placeholder="https://example.com/video" />
+        </div>
+        
+        <div class="button-group">
+            <button class="btn btn-primary" id="parseBtn" onclick="parseUrl()">解析M3U8链接</button>
+            <button class="btn btn-secondary" id="resetBtn" onclick="resetForm()">重置</button>
+        </div>
+        
+        <div id="m3u8List" class="m3u8-list"></div>
+        
+        <div id="downloadForm" class="download-form">
+            <h2>下载设置</h2>
+            <form id="downloadFormElement">
+                <div class="form-group">
+                    <label for="videoName">视频名称：</label>
+                    <input type="text" id="videoName" required />
+                </div>
+                
+                <div class="form-group">
+                    <label for="m3u8Url">M3U8地址：</label>
+                    <input type="text" id="m3u8Url" readonly />
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="useragent">User Agent（可选）：</label>
+                        <input type="text" id="useragent" placeholder="留空使用默认" value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" />
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="dir">下载目录（可选）：</label>
+                        <input type="text" id="dir" placeholder="留空使用默认" />
+                    </div>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="preset">预设（可选）：</label>
+                        <input type="text" id="preset" placeholder="留空" />
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="outputformat">输出格式：<span style="color: red;">*</span></label>
+                        <select id="outputformat" required>
+                            <option value="">请选择</option>
+                            <option value="mp4">MP4</option>
+                            <option value="mkv">MKV</option>
+                            <option value="avi">AVI</option>
+                            <option value="flv">FLV</option>
+                            <option value="ts">TS</option>
+                            <option value="m3u8">M3U8</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div class="button-group">
+                    <button type="submit" class="btn btn-primary">开始下载</button>
+                </div>
+                <div style="margin-top: 15px; text-align: center;">
+                    <a href="/downloads" style="color: #667eea; text-decoration: none; font-size: 14px;">前往下载管理页面查看进度 →</a>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        let currentM3u8List = [];
+        
+        function showAlert(message, type = 'info') {
+            const alertContainer = document.getElementById('alertContainer');
+            alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            alertContainer.firstElementChild.style.display = 'block';
+            
+            setTimeout(() => {
+                alertContainer.innerHTML = '';
+            }, 5000);
+        }
+        
+        async function parseUrl() {
+            const urlInput = document.getElementById('urlInput');
+            const parseBtn = document.getElementById('parseBtn');
+            const url = urlInput.value.trim();
+            
+            if (!url) {
+                showAlert('请输入网页地址', 'error');
+                return;
+            }
+            
+            parseBtn.disabled = true;
+            parseBtn.innerHTML = '解析中<span class="loading"></span>';
+            
+            try {
+                const response = await fetch('/api/parse', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    showAlert(data.error || '解析失败', 'error');
+                    parseBtn.disabled = false;
+                    parseBtn.innerHTML = '解析M3U8链接';
+                    return;
+                }
+                
+                currentM3u8List = data.m3u8_list || [];
+                const pageTitle = data.page_title || '';
+                
+                if (currentM3u8List.length === 0) {
+                    showAlert('未找到M3U8链接', 'error');
+                    parseBtn.disabled = false;
+                    parseBtn.innerHTML = '解析M3U8链接';
+                    return;
+                }
+                
+                // 如果后端返回的name字段是"视频 X"格式，且我们有页面标题，则更新name
+                // 这是双重保险，确保标题能正确显示
+                if (pageTitle && pageTitle !== '未知视频' && pageTitle.trim() !== '') {
+                    currentM3u8List = currentM3u8List.map((item, index) => {
+                        // 检查name是否是默认的"视频 X"格式（支持中文和英文数字）
+                        const isDefaultName = item.name && (
+                            item.name.match(/^视频 [0-9]+$/) || 
+                            item.name.match(/^视频\d+$/) ||
+                            item.name === '视频' ||
+                            item.name.startsWith('视频 ')
+                        );
+                        
+                        // 如果name是默认格式，使用页面标题替换
+                        if (isDefaultName || !item.name || item.name.trim() === '') {
+                            if (currentM3u8List.length > 1) {
+                                item.name = `${pageTitle} - 视频 ${index + 1}`;
+                            } else {
+                                item.name = pageTitle;
+                            }
+                            console.log(`更新视频名称: ${item.name}`);
+                        }
+                        return item;
+                    });
+                }
+                
+                displayM3u8List(currentM3u8List);
+                showAlert(`找到 ${currentM3u8List.length} 个M3U8链接`, 'success');
+                
+            } catch (error) {
+                showAlert('网络错误：' + error.message, 'error');
+            } finally {
+                parseBtn.disabled = false;
+                parseBtn.innerHTML = '解析M3U8链接';
+            }
+        }
+        
+        function displayM3u8List(m3u8List) {
+            const listContainer = document.getElementById('m3u8List');
+            listContainer.style.display = 'block';
+            listContainer.innerHTML = '<h2 style="margin-bottom: 15px; color: #333;">请选择要下载的视频：</h2>';
+            
+            m3u8List.forEach((item, index) => {
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'm3u8-item';
+                itemDiv.onclick = () => selectM3u8(index);
+                itemDiv.innerHTML = `
+                    <h3>${item.name || `视频 ${index + 1}`}</h3>
+                    <div class="url">${item.url}</div>
+                `;
+                listContainer.appendChild(itemDiv);
+            });
+        }
+        
+        function selectM3u8(index) {
+            // 移除所有选中状态
+            document.querySelectorAll('.m3u8-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            
+            // 添加选中状态
+            const items = document.querySelectorAll('.m3u8-item');
+            if (items[index]) {
+                items[index].classList.add('selected');
+            }
+            
+            // 显示下载表单
+            const selectedItem = currentM3u8List[index];
+            document.getElementById('m3u8Url').value = selectedItem.url;
+            document.getElementById('videoName').value = selectedItem.name || '视频';
+            
+            // 根据视频类型自动选择输出格式
+            if (selectedItem.type === 'M3U8') {
+                document.getElementById('outputformat').value = 'ts';
+            } else if (selectedItem.type === 'MP4') {
+                document.getElementById('outputformat').value = 'mp4';
+            } else if (selectedItem.type === 'WEBM') {
+                document.getElementById('outputformat').value = 'webm';
+            }
+            
+            document.getElementById('downloadForm').style.display = 'block';
+            
+            // 确保提交按钮状态正确（重要：防止按钮处于disabled状态）
+            const submitBtn = document.querySelector('#downloadFormElement button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '开始下载';
+            }
+            
+            // 滚动到下载表单
+            document.getElementById('downloadForm').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        async function submitDownload(event) {
+            event.preventDefault();
+            
+            // 获取表单值，如果为空则使用默认值
+            const getUserAgent = () => {
+                const value = document.getElementById('useragent').value.trim();
+                return value || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+            };
+            
+            const selectedIndex = Array.from(document.querySelectorAll('.m3u8-item')).findIndex(item => item.classList.contains('selected'));
+            if (selectedIndex === -1) {
+                showAlert('请先选择一个视频', 'error');
+                return;
+            }
+            
+            const selectedItem = currentM3u8List[selectedIndex];
+            const formData = {
+                name: document.getElementById('videoName').value || selectedItem.name,
+                url: document.getElementById('m3u8Url').value || selectedItem.url,
+                type: selectedItem.type || 'VIDEO',
+                useragent: getUserAgent(),
+                dir: document.getElementById('dir').value || '',
+                outputformat: document.getElementById('outputformat').value || 'mp4'
+            };
+            
+            if (!formData.outputformat) {
+                showAlert('请选择输出格式', 'error');
+                return;
+            }
+            
+            const submitBtn = event.target.querySelector('button[type="submit"]');
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '提交中<span class="loading"></span>';
+            
+            try {
+                const response = await fetch('/api/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    showAlert(data.error || '下载失败', 'error');
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '开始下载';
+                    return;
+                }
+                
+                showAlert('下载任务已启动！请前往下载管理页面查看进度。', 'success');
+                
+                // 立即重置按钮状态，避免按钮一直处于disabled状态
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '开始下载';
+                
+                // 3秒后重置表单
+                setTimeout(() => {
+                    resetForm();
+                }, 3000);
+                
+            } catch (error) {
+                showAlert('网络错误：' + error.message, 'error');
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '开始下载';
+            }
+        }
+        
+        function resetForm() {
+            document.getElementById('urlInput').value = '';
+            document.getElementById('m3u8List').style.display = 'none';
+            document.getElementById('m3u8List').innerHTML = '';
+            document.getElementById('downloadForm').style.display = 'none';
+            document.getElementById('downloadFormElement').reset();
+            // 重置后恢复默认值
+            document.getElementById('useragent').value = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+            currentM3u8List = [];
+            document.getElementById('alertContainer').innerHTML = '';
+            
+            // 重置提交按钮状态（重要：确保按钮可以再次点击）
+            const submitBtn = document.querySelector('#downloadFormElement button[type="submit"]');
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '开始下载';
+            }
+        }
+        
+        // 绑定表单提交事件
+        document.getElementById('downloadFormElement').addEventListener('submit', submitDownload);
+        
+        // 回车键提交解析
+        document.getElementById('urlInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                parseUrl();
+            }
+        });
+    </script>
+</body>
+</html>
+
+
+
+
+
+

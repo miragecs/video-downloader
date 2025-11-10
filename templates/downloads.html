@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>下载管理 - M3U8视频下载工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin: 0;
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .nav-link {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        
+        .nav-link:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+        }
+        
+        .add-download-form {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn-add {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        
+        .btn-add:hover {
+            background: #218838;
+        }
+        
+        .task-list {
+            display: grid;
+            gap: 20px;
+        }
+        
+        .task-item {
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            background: #f9f9f9;
+            transition: all 0.3s;
+        }
+        
+        .task-item:hover {
+            border-color: #667eea;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+        }
+        
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 15px;
+        }
+        
+        .task-name {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .task-url {
+            font-size: 12px;
+            color: #666;
+            word-break: break-all;
+            max-width: 600px;
+        }
+        
+        .task-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-pending {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .status-downloading {
+            background: #17a2b8;
+            color: white;
+        }
+        
+        .status-completed {
+            background: #28a745;
+            color: white;
+        }
+        
+        .status-failed {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .status-cancelled {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .progress-container {
+            margin: 15px 0;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 25px;
+            background: #e0e0e0;
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .task-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-download {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-download:hover {
+            background: #218838;
+        }
+        
+        .btn-delete {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn-delete:hover {
+            background: #c82333;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+        
+        .empty-state h2 {
+            font-size: 24px;
+            margin-bottom: 10px;
+            color: #666;
+        }
+        
+        .empty-state p {
+            font-size: 14px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .error-message {
+            color: #dc3545;
+            font-size: 12px;
+            margin-top: 10px;
+            padding: 8px;
+            background: #f8d7da;
+            border-radius: 4px;
+        }
+        
+        .status-paused {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-pause {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .btn-pause:hover {
+            background: #e0a800;
+        }
+        
+        .btn-resume {
+            background: #17a2b8;
+            color: white;
+        }
+        
+        .btn-resume:hover {
+            background: #138496;
+        }
+        
+        .btn-update {
+            background: #007bff;
+            color: white;
+        }
+        
+        .btn-update:hover {
+            background: #0056b3;
+        }
+        
+        .update-url-input {
+            width: 300px;
+            padding: 6px 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 13px;
+            margin-right: 10px;
+        }
+        
+        .url-update-form {
+            display: flex;
+            align-items: center;
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>下载管理</h1>
+            <div class="nav-links">
+                <a href="/" class="nav-link">返回首页</a>
+                <button class="nav-link" onclick="refreshTasks()" style="border: none; cursor: pointer;">刷新</button>
+            </div>
+        </div>
+        
+        <div class="add-download-form">
+            <h2 style="margin-bottom: 15px; font-size: 18px;">手动添加下载</h2>
+            <div class="form-group">
+                <label for="manualUrl">视频URL:</label>
+                <input type="text" id="manualUrl" placeholder="请输入视频URL（支持M3U8、MP4等格式）">
+            </div>
+            <div class="form-group">
+                <label for="manualName">视频名称（可选）:</label>
+                <input type="text" id="manualName" placeholder="留空则自动从URL提取">
+            </div>
+            <button class="btn-add" onclick="addManualDownload()">添加下载</button>
+        </div>
+        
+        <div id="taskList" class="task-list">
+            <div class="empty-state">
+                <h2>暂无下载任务</h2>
+                <p>请返回首页开始下载视频或手动添加下载链接</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let refreshInterval = null;
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+        
+        function formatTime(seconds) {
+            if (seconds < 60) return Math.round(seconds) + '秒';
+            if (seconds < 3600) return Math.round(seconds / 60) + '分钟';
+            return Math.round(seconds / 3600) + '小时';
+        }
+        
+        function formatDate(timestamp) {
+            if (!timestamp) return '-';
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString('zh-CN');
+        }
+        
+        function getStatusText(status) {
+            const statusMap = {
+                'pending': '等待中',
+                'downloading': '下载中',
+                'completed': '已完成',
+                'failed': '失败',
+                'cancelled': '已取消',
+                'paused': '已暂停'
+            };
+            return statusMap[status] || status;
+        }
+        
+        async function loadTasks() {
+            try {
+                const response = await fetch('/api/downloads');
+                const data = await response.json();
+                
+                const taskList = document.getElementById('taskList');
+                
+                if (!data.tasks || data.tasks.length === 0) {
+                    taskList.innerHTML = `
+                        <div class="empty-state">
+                            <h2>暂无下载任务</h2>
+                            <p>请返回首页开始下载视频</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                taskList.innerHTML = data.tasks.map(task => {
+                    const progress = task.progress || 0;
+                    const speed = task.speed || 0;
+                    const eta = task.eta || 0;
+                    const downloaded = task.downloaded || 0;
+                    const totalSize = task.total_size || 0;
+                    const fileSize = task.file_size || 0;
+                    
+                    let progressText = `${progress.toFixed(1)}%`;
+                    let infoText = '';
+                    
+                    if (task.status === 'downloading') {
+                        if (totalSize > 0) {
+                            infoText = `${formatBytes(downloaded)} / ${formatBytes(totalSize)}`;
+                            if (speed > 0) {
+                                infoText += ` - ${formatBytes(speed)}/s`;
+                                if (eta > 0) {
+                                    infoText += ` - 剩余 ${formatTime(eta)}`;
+                                }
+                            }
+                        } else if (task.total_segments > 0) {
+                            infoText = `片段 ${task.downloaded_segments} / ${task.total_segments}`;
+                        }
+                    } else if (task.status === 'completed') {
+                        if (fileSize > 0) {
+                            infoText = `文件大小: ${formatBytes(fileSize)}`;
+                        }
+                    }
+                    
+                    return `
+                        <div class="task-item">
+                            <div class="task-header">
+                                <div>
+                                    <div class="task-name">${task.name}</div>
+                                    <div class="task-url">${task.url.substring(0, 100)}${task.url.length > 100 ? '...' : ''}</div>
+                                </div>
+                                <span class="task-status status-${task.status}">${getStatusText(task.status)}</span>
+                            </div>
+                            
+                            ${task.status === 'downloading' || task.status === 'pending' || task.status === 'paused' ? `
+                                <div class="progress-container">
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" style="width: ${progress}%">
+                                            ${progress > 10 ? progressText : ''}
+                                        </div>
+                                    </div>
+                                    <div class="progress-info">
+                                        <span>${progressText}</span>
+                                        <span>${infoText}</span>
+                                    </div>
+                                </div>
+                            ` : ''}
+                            
+                            ${task.status === 'completed' ? `
+                                <div class="progress-info" style="margin-top: 10px;">
+                                    <span>${infoText}</span>
+                                    <span>完成时间: ${formatDate(task.end_time)}</span>
+                                </div>
+                            ` : ''}
+                            
+                            ${task.status === 'failed' ? `
+                                <div class="error-message">
+                                    错误: ${task.error || '下载失败'}
+                                    <div class="url-update-form" style="margin-top: 10px;">
+                                        <input type="text" class="update-url-input" id="updateUrl_${task.task_id}" placeholder="输入新的下载URL">
+                                        <button class="btn btn-update" onclick="updateTaskUrl('${task.task_id}')">更新URL</button>
+                                    </div>
+                                </div>
+                            ` : ''}
+                            
+                            ${task.status === 'cancelled' ? `
+                                <div class="error-message" style="background: #fff3cd; color: #856404;">
+                                    任务已取消
+                                </div>
+                            ` : ''}
+                            
+                            <div class="task-actions">
+                                ${task.status === 'completed' ? `
+                                    <button class="btn btn-download" onclick="downloadFile('${task.task_id}')">下载文件</button>
+                                    <button class="btn btn-delete" onclick="deleteTask('${task.task_id}')">删除任务</button>
+                                ` : ''}
+                                ${task.status === 'failed' || task.status === 'cancelled' ? `
+                                    <button class="btn btn-delete" onclick="deleteTask('${task.task_id}')">删除任务</button>
+                                ` : ''}
+                                ${task.status === 'downloading' ? `
+                                    <button class="btn btn-pause" onclick="pauseTask('${task.task_id}')">暂停</button>
+                                    <button class="btn btn-delete" onclick="deleteTask('${task.task_id}', true)" style="background: #ffc107; color: #333;">取消下载</button>
+                                ` : ''}
+                                ${task.status === 'paused' ? `
+                                    <button class="btn btn-resume" onclick="resumeTask('${task.task_id}')">恢复</button>
+                                    <button class="btn btn-delete" onclick="deleteTask('${task.task_id}', true)" style="background: #ffc107; color: #333;">取消下载</button>
+                                ` : ''}
+                                ${task.status === 'pending' ? `
+                                    <button class="btn btn-pause" onclick="pauseTask('${task.task_id}')">暂停</button>
+                                    <button class="btn btn-delete" onclick="deleteTask('${task.task_id}', true)" style="background: #ffc107; color: #333;">取消下载</button>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('加载任务失败:', error);
+            }
+        }
+        
+        async function deleteTask(taskId, isCancelling = false) {
+            const message = isCancelling ? '确定要取消这个下载任务吗？' : '确定要删除这个任务吗？';
+            if (!confirm(message)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/download/${taskId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadTasks();
+                } else {
+                    alert(data.error || '操作失败');
+                }
+            } catch (error) {
+                alert('操作失败: ' + error.message);
+            }
+        }
+        
+        function downloadFile(taskId) {
+            window.location.href = `/api/download/${taskId}/file`;
+        }
+        
+        async function pauseTask(taskId) {
+            try {
+                const response = await fetch(`/api/download/${taskId}/pause`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadTasks();
+                } else {
+                    alert(data.error || '暂停失败');
+                }
+            } catch (error) {
+                alert('暂停失败: ' + error.message);
+            }
+        }
+        
+        async function resumeTask(taskId) {
+            try {
+                const response = await fetch(`/api/download/${taskId}/resume`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadTasks();
+                } else {
+                    alert(data.error || '恢复失败');
+                }
+            } catch (error) {
+                alert('恢复失败: ' + error.message);
+            }
+        }
+        
+        async function updateTaskUrl(taskId) {
+            const newUrl = document.getElementById(`updateUrl_${taskId}`).value.trim();
+            if (!newUrl) {
+                alert('请输入新的URL');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/download/${taskId}/update_url`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ url: newUrl })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert(data.message || 'URL更新成功');
+                    loadTasks();
+                } else {
+                    alert(data.error || 'URL更新失败');
+                }
+            } catch (error) {
+                alert('URL更新失败: ' + error.message);
+            }
+        }
+        
+        async function addManualDownload() {
+            const url = document.getElementById('manualUrl').value.trim();
+            if (!url) {
+                alert('请输入视频URL');
+                return;
+            }
+            
+            const name = document.getElementById('manualName').value.trim();
+            
+            try {
+                const response = await fetch('/api/download/manual', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        name: name || undefined
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert(data.message || '下载任务已添加');
+                    document.getElementById('manualUrl').value = '';
+                    document.getElementById('manualName').value = '';
+                    loadTasks();
+                } else {
+                    alert(data.error || '添加下载任务失败');
+                }
+            } catch (error) {
+                alert('添加下载任务失败: ' + error.message);
+            }
+        }
+        
+        function refreshTasks() {
+            loadTasks();
+        }
+        
+        // 自动刷新
+        function startAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            refreshInterval = setInterval(() => {
+                loadTasks();
+            }, 2000); // 每2秒刷新一次
+        }
+        
+        // 页面加载时开始自动刷新
+        window.addEventListener('load', () => {
+            loadTasks();
+            startAutoRefresh();
+        });
+        
+        // 页面离开时清除定时器
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
+

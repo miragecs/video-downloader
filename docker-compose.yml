@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  video-downloader:
+    build: 
+      context: .
+      # 如果需要指定ARM架构，取消下面的注释并根据需要选择：
+      # platforms:
+      #   - linux/arm64
+      #   - linux/arm/v7
+    container_name: video-downloader
+    ports:
+      - "5000:5001"
+    restart: unless-stopped
+    environment:
+      - FLASK_ENV=production
+      # 下载目录配置（可选，默认: ./downloads）
+      - DOWNLOAD_DIR=${DOWNLOAD_DIR:-./downloads}
+      # 最大下载线程数（可选，默认: 8）
+      - MAX_DOWNLOAD_THREADS=${MAX_DOWNLOAD_THREADS:-8}
+    volumes:
+      # 挂载下载目录到宿主机，确保数据持久化
+      - ./downloads:/mnt/Storage1/下载/download
+    networks:
+      - video-network
+
+networks:
+  video-network:
+    driver: bridge
+
