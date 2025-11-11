@@ -10,7 +10,7 @@ services:
       #   - linux/arm/v7
     container_name: video-downloader
     ports:
-      - "5000:5001"
+      - "5000:5000"
     restart: unless-stopped
     environment:
       - FLASK_ENV=production
@@ -18,9 +18,19 @@ services:
       - DOWNLOAD_DIR=${DOWNLOAD_DIR:-./downloads}
       # 最大下载线程数（可选，默认: 8）
       - MAX_DOWNLOAD_THREADS=${MAX_DOWNLOAD_THREADS:-8}
+      # 最大并发下载任务数（可选，默认: 3）
+      - MAX_CONCURRENT_DOWNLOADS=${MAX_CONCURRENT_DOWNLOADS:-3}
+      # 管理员用户名（可选，默认: admin）
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # 管理员密码（可选，默认: admin123，生产环境请修改）
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      # Flask session密钥（可选，默认: your-secret-key-change-this-in-production，生产环境请修改）
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-this-in-production}
+      # 视频名字前缀（可选，默认: 空）
+      - VIDEO_NAME_PREFIX=${VIDEO_NAME_PREFIX:-}
     volumes:
       # 挂载下载目录到宿主机，确保数据持久化
-      - ./downloads:/mnt/Storage1/下载/download
+      - ./downloads:/app/downloads
     networks:
       - video-network
 

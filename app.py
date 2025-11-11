@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, session, redirect, url_for
+from functools import wraps
 import requests
 import re
 import json
@@ -10,8 +11,10 @@ from urllib.parse import urlparse, urljoin
 import hashlib
 from pathlib import Path
 import shutil
+from datetime import datetime
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')  # 生产环境请更改此密钥
 
 # 下载配置
 DOWNLOAD_DIR = os.environ.get('DOWNLOAD_DIR', './downloads')
@@ -31,6 +34,29 @@ download_lock = threading.Lock()
 MAX_CONCURRENT_DOWNLOADS = int(os.environ.get('MAX_CONCURRENT_DOWNLOADS', '3'))  # 默认同时下载3个任务
 active_download_threads = {}  # 存储活动的下载线程
 download_thread_lock = threading.Lock()
+
+# 用户认证配置（简单单用户登录）
+USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')  # 生产环境请更改默认密码
+
+# 解析队列管理（内存存储，可扩展为数据库）
+parse_queue = []  # 存储待解析的URL队列，格式: [{'id': id, 'url': url, 'priority': priority, 'status': status, 'created_at': timestamp}]
+parse_queue_lock = threading.Lock()
+parse_queue_counter = 0  # 用于生成唯一ID
+
+# 解析历史记录（内存存储，可扩展为数据库）
+parse_history = {}  # 格式: {queue_id: {'url': url, 'videos': [...], 'page_title': title, 'parsed_at': timestamp, 'status': 'success'/'failed'}}
+parse_history_lock = threading.Lock()
+
+# 自动选择配置
+auto_select_prefixes = []  # 存储前缀匹配规则，格式: ['前缀1', '前缀2', ...]
+auto_select_lock = threading.Lock()
+
+# 视频名字前缀配置
+video_name_prefix = os.environ.get('VIDEO_NAME_PREFIX', '')  # 默认为空
+
+# 解析和下载互斥控制（确保解析和下载不同时执行）
+parse_download_mutex_lock = threading.Lock()  # 用于控制解析和下载的互斥执行
 
 # 设置环境变量以确保在无GUI系统中正常运行
 if 'DISPLAY' not in os.environ:
@@ -269,7 +295,7 @@ def extract_video_from_network_requests(url):
             finally:
                 browser.close()
             
-            # 将捕获的URL转换为列表格式
+            # 将捕获的URL转换为列表格式（在with块内）
             for url_item, info in captured_urls.items():
                 video_urls.append({
                     'url': url_item,
@@ -301,6 +327,11 @@ def extract_video_from_network_requests(url):
         else:
             name = f"{page_title} ({video_type})" if page_title and page_title != "未知视频" else f"{video_type}视频 1"
         
+        # 应用视频名字前缀（如果已配置）
+        global video_name_prefix
+        if video_name_prefix:
+            name = f"{video_name_prefix}{name}"
+        
         formatted_links.append({
             'url': url_item,
             'name': name,
@@ -311,19 +342,415 @@ def extract_video_from_network_requests(url):
     return formatted_links, page_title
 
 
+# 登录验证装饰器
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in' not in session or not session['logged_in']:
+            if request.is_json:
+                return jsonify({'error': '需要登录'}), 401
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """登录页面"""
+    if request.method == 'POST':
+        data = request.get_json() if request.is_json else request.form
+        username = data.get('username', '')
+        password = data.get('password', '')
+        
+        if username == USERNAME and password == PASSWORD:
+            session['logged_in'] = True
+            session['username'] = username
+            if request.is_json:
+                return jsonify({'success': True, 'message': '登录成功'})
+            return redirect(url_for('index'))
+        else:
+            if request.is_json:
+                return jsonify({'error': '用户名或密码错误'}), 401
+            return render_template('login.html', error='用户名或密码错误')
+    
+    # 如果已经登录，重定向到主页
+    if session.get('logged_in'):
+        return redirect(url_for('index'))
+    
+    return render_template('login.html')
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    """登出"""
+    session.clear()
+    if request.is_json:
+        return jsonify({'success': True, 'message': '已登出'})
+    return redirect(url_for('login'))
+
+
 @app.route('/')
+@login_required
 def index():
     """主页"""
     return render_template('index.html')
 
 
 @app.route('/downloads')
+@login_required
 def downloads_page():
     """下载管理页面"""
     return render_template('downloads.html')
 
 
+@app.route('/parse-queue')
+@login_required
+def parse_queue_page():
+    """解析队列管理页面"""
+    return render_template('parse_queue.html')
+
+
+def _has_active_downloads():
+    """检查是否有正在下载的任务"""
+    with download_thread_lock:
+        active_downloads = [
+            tid for tid, thread in active_download_threads.items()
+            if thread.is_alive() and download_tasks.get(tid, {}).get('status') == 'downloading'
+        ]
+        return len(active_downloads) > 0
+
+
+def _has_active_parse_tasks():
+    """检查是否有正在处理或待处理的解析任务"""
+    with parse_queue_lock:
+        active_tasks = [
+            task for task in parse_queue
+            if task.get('status') in ['pending', 'processing']
+        ]
+        return len(active_tasks) > 0
+
+
+def process_download_queue():
+    """处理下载队列，当有可用槽位时启动pending状态的任务（与解析任务互斥）"""
+    while True:
+        try:
+            time.sleep(2)  # 每2秒检查一次
+            
+            # 检查是否有正在处理的解析任务，如果有则等待
+            if _has_active_parse_tasks():
+                continue
+            
+            with download_thread_lock:
+                active_count = len([tid for tid, thread in active_download_threads.items() 
+                                   if thread.is_alive() and download_tasks.get(tid, {}).get('status') == 'downloading'])
+            
+            if active_count < MAX_CONCURRENT_DOWNLOADS:
+                # 查找pending状态的任务
+                with download_lock:
+                    pending_tasks = [tid for tid, task in download_tasks.items() 
+                                   if task.get('status') == 'pending']
+                
+                if pending_tasks:
+                    # 启动第一个pending任务
+                    task_id = pending_tasks[0]
+                    task = download_tasks[task_id]
+                    
+                    # 更新任务状态为downloading
+                    with download_lock:
+                        if task_id in download_tasks:
+                            download_tasks[task_id]['status'] = 'downloading'
+                            download_tasks[task_id]['start_time'] = time.time()
+                    
+                    # 启动下载线程
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    if task.get('referer'):
+                        headers['Referer'] = task['referer']
+                    
+                    thread = threading.Thread(
+                        target=download_task_worker,
+                        args=(task_id, task['url'], task['output_path'], 
+                              task['video_type'], headers, 
+                              MAX_WORKERS, False)
+                    )
+                    thread.daemon = True
+                    thread.start()
+                    
+                    # 添加到活动线程列表
+                    with download_thread_lock:
+                        active_download_threads[task_id] = thread
+                    
+                    print(f"从队列启动下载任务: {task.get('name', task_id)} ({task_id})")
+        except Exception as e:
+            print(f"处理下载队列失败: {e}")
+            time.sleep(5)
+
+
+def _start_auto_selected_downloads():
+    """启动所有自动选择的下载任务（一次性启动，受并发限制控制）"""
+    try:
+        # 下载队列处理线程已在启动时运行，无需再次启动
+        
+        # 再次确认所有解析任务已完成
+        if _has_active_parse_tasks():
+            print("仍有解析任务在处理，延迟启动下载...")
+            return
+        
+        # 查找所有自动选择的pending下载任务
+        with download_lock:
+            auto_selected_tasks = [
+                (task_id, task) for task_id, task in download_tasks.items()
+                if task.get('status') == 'pending' and task.get('auto_selected', False)
+            ]
+        
+        if not auto_selected_tasks:
+            print("没有待启动的自动选择下载任务")
+            return
+        
+        print(f"解析队列为空，找到 {len(auto_selected_tasks)} 个自动选择的下载任务，开始一次性启动...")
+        
+        # 一次性启动所有下载任务（受并发限制控制，超出限制的会进入队列）
+        started_count = 0
+        for task_id, task in auto_selected_tasks:
+            try:
+                with download_thread_lock:
+                    active_count = len([tid for tid, thread in active_download_threads.items() 
+                                       if thread.is_alive() and download_tasks.get(tid, {}).get('status') == 'downloading'])
+                    
+                    if active_count >= MAX_CONCURRENT_DOWNLOADS:
+                        # 达到并发限制，剩余任务会由process_download_queue处理
+                        print(f"已达到并发下载限制（{active_count}/{MAX_CONCURRENT_DOWNLOADS}），剩余 {len(auto_selected_tasks) - started_count} 个任务将进入队列等待")
+                        break
+                    
+                    # 更新任务状态为downloading
+                    with download_lock:
+                        if task_id in download_tasks:
+                            download_tasks[task_id]['status'] = 'downloading'
+                            download_tasks[task_id]['start_time'] = time.time()
+                    
+                    # 准备请求头
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                    if task.get('referer'):
+                        headers['Referer'] = task['referer']
+                    
+                    # 启动下载线程
+                    thread = threading.Thread(
+                        target=download_task_worker,
+                        args=(task_id, task['url'], task['output_path'], 
+                              task['video_type'], headers, MAX_WORKERS, False)
+                    )
+                    thread.daemon = True
+                    thread.start()
+                    
+                    # 添加到活动线程列表
+                    active_download_threads[task_id] = thread
+                    started_count += 1
+                    print(f"已启动下载任务: {task.get('name', task_id)} ({task_id})")
+            except Exception as e:
+                print(f"启动下载任务失败 ({task.get('name', task_id)}): {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"已启动 {started_count} 个下载任务，剩余 {len(auto_selected_tasks) - started_count} 个任务在队列中等待")
+    except Exception as e:
+        print(f"启动自动选择下载任务失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def process_parse_queue():
+    """处理解析队列的线程函数（与下载任务互斥）"""
+    while True:
+        try:
+            time.sleep(2)  # 每2秒检查一次
+            
+            # 检查是否有正在下载的任务，如果有则等待
+            if _has_active_downloads():
+                continue
+            
+            # 查找待解析的任务（按优先级排序）
+            with parse_queue_lock:
+                pending_tasks = [task for task in parse_queue if task.get('status') == 'pending']
+                if not pending_tasks:
+                    continue
+                
+                # 按优先级排序（数字越小优先级越高）
+                pending_tasks.sort(key=lambda x: x.get('priority', 999))
+                task = pending_tasks[0]
+                
+                # 标记为处理中
+                task['status'] = 'processing'
+                task['started_at'] = time.time()
+                queue_id = task['id']
+                url = task['url']
+            
+            # 解析URL
+            try:
+                formatted_links, page_title = extract_video_from_network_requests(url)
+                
+                # 自动选择（基于URL前缀匹配）
+                selected_videos = []
+                with auto_select_lock:
+                    prefixes = list(auto_select_prefixes)
+                
+                if prefixes:
+                    for link in formatted_links:
+                        for prefix in prefixes:
+                            # 只根据URL前缀匹配，不根据文件名
+                            if link['url'].startswith(prefix):
+                                selected_videos.append(link)
+                                break
+                
+                # 保存到历史记录
+                with parse_history_lock:
+                    parse_history[queue_id] = {
+                        'url': url,
+                        'videos': formatted_links,
+                        'selected_videos': selected_videos,
+                        'page_title': page_title,
+                        'parsed_at': time.time(),
+                        'status': 'success'
+                    }
+                
+                # 为自动选择的视频创建下载任务（但不立即启动，等所有解析完成后再启动）
+                if selected_videos:
+                    print(f"自动选择到 {len(selected_videos)} 个视频，创建下载任务（等待解析队列完成后启动）...")
+                    for video in selected_videos:
+                        try:
+                            # 创建下载任务
+                            video_url = video['url']
+                            video_name = video['name']
+                            video_type = video.get('type', 'VIDEO')
+                            
+                            # 生成任务ID
+                            task_id = generate_task_id(video_url, video_name)
+                            
+                            # 确定输出文件路径
+                            output_dir = DOWNLOAD_DIR
+                            
+                            # 清理文件名
+                            safe_name = re.sub(r'[^\w\s\u4e00-\u9fff-]', '', video_name).strip()
+                            safe_name = re.sub(r'\s+', '_', safe_name)
+                            if not safe_name:
+                                safe_name = 'video'
+                            
+                            # 根据视频类型确定输出格式
+                            output_format = 'mp4'
+                            if video_type == 'M3U8':
+                                output_format = 'mp4'
+                            elif video_type in ['MP4', 'MOV']:
+                                output_format = 'mp4'
+                            elif video_type == 'WEBM':
+                                output_format = 'webm'
+                            
+                            output_filename = f"{safe_name}.{output_format}"
+                            output_path = os.path.join(output_dir, output_filename)
+                            
+                            # 如果文件已存在，添加序号
+                            counter = 1
+                            while os.path.exists(output_path):
+                                output_filename = f"{safe_name}_{counter}.{output_format}"
+                                output_path = os.path.join(output_dir, output_filename)
+                                counter += 1
+                            
+                            # 创建下载任务（状态为pending，不立即启动）
+                            with download_lock:
+                                # 检查任务是否已存在（避免重复创建）
+                                if task_id not in download_tasks:
+                                    download_tasks[task_id] = {
+                                        'task_id': task_id,
+                                        'url': video_url,
+                                        'name': video_name,
+                                        'output_path': output_path,
+                                        'output_filename': output_filename,
+                                        'status': 'pending',
+                                        'video_type': video_type,
+                                        'progress': 0,
+                                        'downloaded': 0,
+                                        'total_size': 0,
+                                        'total_segments': 0,
+                                        'downloaded_segments': 0,
+                                        'start_time': None,
+                                        'end_time': None,
+                                        'error': None,
+                                        'file_size': 0,
+                                        'referer': url,
+                                        'auto_selected': True  # 标记为自动选择的任务
+                                    }
+                                    print(f"已创建下载任务（待启动）: {video_name} ({task_id})")
+                                else:
+                                    print(f"下载任务已存在，跳过: {video_name} ({task_id})")
+                        except Exception as e:
+                            print(f"创建下载任务失败 ({video.get('name', '未知')}): {e}")
+                            import traceback
+                            traceback.print_exc()
+                
+                # 更新队列状态
+                with parse_queue_lock:
+                    for t in parse_queue:
+                        if t['id'] == queue_id:
+                            t['status'] = 'completed'
+                            t['completed_at'] = time.time()
+                            break
+                
+                print(f"解析队列任务 {queue_id} 完成: {url}")
+                if selected_videos:
+                    print(f"已为 {len(selected_videos)} 个视频创建下载任务（等待解析队列完成后启动）")
+                
+                # 检查是否所有解析任务都已完成，如果是则启动下载
+                if not _has_active_parse_tasks():
+                    # 所有解析任务都已完成，启动自动选择的下载任务
+                    print("所有解析任务已完成，开始启动自动选择的下载任务...")
+                    _start_auto_selected_downloads()
+                
+            except Exception as e:
+                print(f"解析队列任务 {queue_id} 失败: {e}")
+                import traceback
+                traceback.print_exc()
+                
+                # 保存失败记录
+                with parse_history_lock:
+                    parse_history[queue_id] = {
+                        'url': url,
+                        'videos': [],
+                        'selected_videos': [],
+                        'page_title': '',
+                        'parsed_at': time.time(),
+                        'status': 'failed',
+                        'error': str(e)
+                    }
+                
+                # 更新队列状态
+                with parse_queue_lock:
+                    for t in parse_queue:
+                        if t['id'] == queue_id:
+                            t['status'] = 'failed'
+                            t['completed_at'] = time.time()
+                            t['error'] = str(e)
+                            break
+                
+                # 即使失败，也要检查是否所有解析任务都已完成（包括失败的任务）
+                # 如果所有任务都已完成（completed或failed），可以启动下载
+                if not _has_active_parse_tasks():
+                    print("所有解析任务已完成（包含失败的任务），检查是否启动下载...")
+                    _start_auto_selected_downloads()
+                
+        except Exception as e:
+            print(f"处理解析队列时出错: {e}")
+            time.sleep(5)
+
+
+# 启动解析队列处理线程
+parse_queue_thread = threading.Thread(target=process_parse_queue, daemon=True)
+parse_queue_thread.start()
+
+# 启动下载队列处理线程（持续运行，与解析任务互斥）
+download_queue_thread = threading.Thread(target=process_download_queue, daemon=True)
+download_queue_thread.start()
+print("解析队列和下载队列处理线程已启动（互斥执行）")
+
+
 @app.route('/api/parse', methods=['POST'])
+@login_required
 def parse_url():
     """解析网址获取视频链接（包括m3u8和其他视频格式）"""
     try:
@@ -358,6 +785,179 @@ def parse_url():
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'解析失败: {str(e)}'}), 500
+
+
+# 解析队列管理API
+@app.route('/api/parse-queue', methods=['GET'])
+@login_required
+def get_parse_queue():
+    """获取解析队列"""
+    with parse_queue_lock:
+        queue_list = list(parse_queue)
+    return jsonify({'success': True, 'queue': queue_list})
+
+
+@app.route('/api/parse-queue', methods=['POST'])
+@login_required
+def add_parse_queue():
+    """添加解析队列任务"""
+    try:
+        data = request.get_json()
+        url = data.get('url', '').strip()
+        priority = data.get('priority', 999)  # 默认优先级
+        
+        if not url:
+            return jsonify({'error': 'URL不能为空'}), 400
+        
+        # 添加协议如果缺失
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        
+        global parse_queue_counter
+        with parse_queue_lock:
+            parse_queue_counter += 1
+            queue_id = parse_queue_counter
+            task = {
+                'id': queue_id,
+                'url': url,
+                'priority': priority,
+                'status': 'pending',
+                'created_at': time.time()
+            }
+            parse_queue.append(task)
+            # 按优先级排序
+            parse_queue.sort(key=lambda x: x.get('priority', 999))
+        
+        return jsonify({
+            'success': True,
+            'queue_id': queue_id,
+            'message': '已添加到解析队列'
+        })
+    except Exception as e:
+        return jsonify({'error': f'添加失败: {str(e)}'}), 500
+
+
+@app.route('/api/parse-queue/<int:queue_id>', methods=['DELETE'])
+@login_required
+def delete_parse_queue(queue_id):
+    """删除解析队列任务"""
+    try:
+        with parse_queue_lock:
+            parse_queue[:] = [task for task in parse_queue if task['id'] != queue_id]
+        return jsonify({'success': True, 'message': '已删除'})
+    except Exception as e:
+        return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+
+@app.route('/api/parse-queue/<int:queue_id>/priority', methods=['POST'])
+@login_required
+def update_parse_queue_priority(queue_id):
+    """更新解析队列任务优先级"""
+    try:
+        data = request.get_json()
+        priority = data.get('priority', 999)
+        
+        with parse_queue_lock:
+            for task in parse_queue:
+                if task['id'] == queue_id:
+                    task['priority'] = priority
+                    # 重新排序
+                    parse_queue.sort(key=lambda x: x.get('priority', 999))
+                    return jsonify({'success': True, 'message': '优先级已更新'})
+        
+        return jsonify({'error': '任务不存在'}), 404
+    except Exception as e:
+        return jsonify({'error': f'更新失败: {str(e)}'}), 500
+
+
+@app.route('/api/parse-history', methods=['GET'])
+@login_required
+def get_parse_history():
+    """获取解析历史记录"""
+    with parse_history_lock:
+        history_list = []
+        for queue_id, record in parse_history.items():
+            history_list.append({
+                'queue_id': queue_id,
+                **record
+            })
+        # 按时间倒序排列
+        history_list.sort(key=lambda x: x.get('parsed_at', 0), reverse=True)
+    return jsonify({'success': True, 'history': history_list})
+
+
+@app.route('/api/parse-history/<int:queue_id>', methods=['GET'])
+@login_required
+def get_parse_history_detail(queue_id):
+    """获取解析历史记录详情"""
+    with parse_history_lock:
+        if queue_id not in parse_history:
+            return jsonify({'error': '记录不存在'}), 404
+        return jsonify({'success': True, 'record': parse_history[queue_id]})
+
+
+@app.route('/api/parse-history/<int:queue_id>', methods=['DELETE'])
+@login_required
+def delete_parse_history(queue_id):
+    """删除解析历史记录"""
+    try:
+        with parse_history_lock:
+            if queue_id in parse_history:
+                del parse_history[queue_id]
+        return jsonify({'success': True, 'message': '已删除'})
+    except Exception as e:
+        return jsonify({'error': f'删除失败: {str(e)}'}), 500
+
+
+@app.route('/api/auto-select', methods=['GET'])
+@login_required
+def get_auto_select_prefixes():
+    """获取自动选择前缀列表"""
+    with auto_select_lock:
+        return jsonify({'success': True, 'prefixes': list(auto_select_prefixes)})
+
+
+@app.route('/api/auto-select', methods=['POST'])
+@login_required
+def set_auto_select_prefixes():
+    """设置自动选择前缀列表"""
+    try:
+        data = request.get_json()
+        prefixes = data.get('prefixes', [])
+        
+        if not isinstance(prefixes, list):
+            return jsonify({'error': '前缀列表必须是数组'}), 400
+        
+        with auto_select_lock:
+            auto_select_prefixes[:] = prefixes
+        
+        return jsonify({'success': True, 'message': '前缀列表已更新'})
+    except Exception as e:
+        return jsonify({'error': f'设置失败: {str(e)}'}), 500
+
+
+@app.route('/api/video-name-prefix', methods=['GET'])
+@login_required
+def get_video_name_prefix():
+    """获取视频名字前缀"""
+    global video_name_prefix
+    return jsonify({'success': True, 'prefix': video_name_prefix})
+
+
+@app.route('/api/video-name-prefix', methods=['POST'])
+@login_required
+def set_video_name_prefix():
+    """设置视频名字前缀"""
+    try:
+        data = request.get_json()
+        prefix = data.get('prefix', '')
+        
+        global video_name_prefix
+        video_name_prefix = prefix
+        
+        return jsonify({'success': True, 'message': '前缀已更新'})
+    except Exception as e:
+        return jsonify({'error': f'设置失败: {str(e)}'}), 500
 
 
 def generate_task_id(url, name):
@@ -1105,11 +1705,7 @@ def start_download():
         with download_thread_lock:
             active_download_threads[task_id] = thread
         
-        # 启动队列处理线程（如果不存在）
-        if not hasattr(start_download, '_queue_thread_started'):
-            queue_thread = threading.Thread(target=process_download_queue, daemon=True)
-            queue_thread.start()
-            start_download._queue_thread_started = True
+        # 下载队列处理线程已在启动时运行，无需再次启动
         
         return jsonify({
             'success': True,
@@ -1122,49 +1718,6 @@ def start_download():
         import traceback
         traceback.print_exc()
         return jsonify({'error': f'启动下载失败: {str(e)}'}), 500
-
-
-def process_download_queue():
-    """处理下载队列，当有可用槽位时启动pending状态的任务"""
-    while True:
-        try:
-            time.sleep(2)  # 每2秒检查一次
-            
-            with download_thread_lock:
-                active_count = len([tid for tid, thread in active_download_threads.items() 
-                                   if thread.is_alive() and download_tasks.get(tid, {}).get('status') == 'downloading'])
-            
-            if active_count < MAX_CONCURRENT_DOWNLOADS:
-                # 查找pending状态的任务
-                with download_lock:
-                    pending_tasks = [tid for tid, task in download_tasks.items() 
-                                   if task.get('status') == 'pending']
-                
-                if pending_tasks:
-                    # 启动第一个pending任务
-                    task_id = pending_tasks[0]
-                    task = download_tasks[task_id]
-                    
-                    # 启动下载线程
-                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-                    if task.get('referer'):
-                        headers['Referer'] = task['referer']
-                    
-                    thread = threading.Thread(
-                        target=download_task_worker,
-                        args=(task_id, task['url'], task['output_path'], 
-                              task['video_type'], headers, 
-                              MAX_WORKERS, False)
-                    )
-                    thread.daemon = True
-                    thread.start()
-                    
-                    # 添加到活动线程列表
-                    with download_thread_lock:
-                        active_download_threads[task_id] = thread
-        except Exception as e:
-            print(f"处理下载队列失败: {e}")
-            time.sleep(5)
 
 
 @app.route('/api/download/<task_id>', methods=['GET'])
@@ -1205,6 +1758,7 @@ def get_download_status(task_id):
 
 
 @app.route('/api/download/<task_id>', methods=['DELETE'])
+@login_required
 def delete_download(task_id):
     """删除下载任务"""
     try:
@@ -1252,6 +1806,7 @@ def delete_download(task_id):
 
 
 @app.route('/api/downloads', methods=['GET'])
+@login_required
 def list_downloads():
     """列出所有下载任务"""
     with download_lock:
@@ -1276,6 +1831,7 @@ def list_downloads():
 
 
 @app.route('/api/download/<task_id>/file', methods=['GET'])
+@login_required
 def download_file(task_id):
     """下载已完成的文件"""
     with download_lock:
@@ -1297,6 +1853,7 @@ def download_file(task_id):
 
 
 @app.route('/api/download/<task_id>/pause', methods=['POST'])
+@login_required
 def pause_download(task_id):
     """暂停下载任务"""
     with download_lock:
@@ -1316,6 +1873,7 @@ def pause_download(task_id):
 
 
 @app.route('/api/download/<task_id>/resume', methods=['POST'])
+@login_required
 def resume_download(task_id):
     """恢复下载任务（支持断点续传）"""
     with download_lock:
@@ -1370,6 +1928,7 @@ def resume_download(task_id):
 
 
 @app.route('/api/download/manual', methods=['POST'])
+@login_required
 def manual_add_download():
     """手动添加下载任务"""
     try:
@@ -1474,11 +2033,7 @@ def manual_add_download():
         with download_thread_lock:
             active_download_threads[task_id] = thread
         
-        # 启动队列处理线程（如果不存在）
-        if not hasattr(manual_add_download, '_queue_thread_started'):
-            queue_thread = threading.Thread(target=process_download_queue, daemon=True)
-            queue_thread.start()
-            manual_add_download._queue_thread_started = True
+        # 下载队列处理线程已在启动时运行，无需再次启动
         
         return jsonify({
             'success': True,
@@ -1494,6 +2049,7 @@ def manual_add_download():
 
 
 @app.route('/api/download/<task_id>/update_url', methods=['POST'])
+@login_required
 def update_download_url(task_id):
     """更新下载任务的URL（用于失效的下载链接）"""
     try:

@@ -349,7 +349,9 @@
             <h1>下载管理</h1>
             <div class="nav-links">
                 <a href="/" class="nav-link">返回首页</a>
+                <a href="/parse-queue" class="nav-link">解析队列</a>
                 <button class="nav-link" onclick="refreshTasks()" style="border: none; cursor: pointer;">刷新</button>
+                <button class="nav-link" onclick="logout()" style="border: none; cursor: pointer; background: #dc3545;">登出</button>
             </div>
         </div>
         
@@ -661,6 +663,20 @@
         
         function refreshTasks() {
             loadTasks();
+        }
+        
+        async function logout() {
+            try {
+                const response = await fetch('/logout', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                window.location.href = '/login';
+            } catch (error) {
+                window.location.href = '/login';
+            }
         }
         
         // 自动刷新

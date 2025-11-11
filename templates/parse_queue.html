@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>解析队列 - M3U8视频下载工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin: 0;
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .nav-link {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        
+        .nav-link:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+        }
+        
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+        
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        
+        .queue-list, .history-list {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .queue-item, .history-item {
+            padding: 15px;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .queue-item:last-child, .history-item:last-child {
+            border-bottom: none;
+        }
+        
+        .queue-item-info {
+            flex: 1;
+        }
+        
+        .queue-item-url {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+            word-break: break-all;
+        }
+        
+        .queue-item-meta {
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-pending {
+            background: #ffc107;
+            color: #333;
+        }
+        
+        .status-processing {
+            background: #17a2b8;
+            color: white;
+        }
+        
+        .status-completed {
+            background: #28a745;
+            color: white;
+        }
+        
+        .status-failed {
+            background: #dc3545;
+            color: white;
+        }
+        
+        .queue-item-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .priority-input {
+            width: 60px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .config-section {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        
+        .prefix-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .prefix-tag {
+            padding: 5px 10px;
+            background: #667eea;
+            color: white;
+            border-radius: 4px;
+            font-size: 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .prefix-tag .remove {
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>解析队列管理</h1>
+            <div class="nav-links">
+                <a href="/" class="nav-link">首页</a>
+                <a href="/downloads" class="nav-link">下载管理</a>
+                <button class="nav-link" onclick="logout()" style="border: none; cursor: pointer;">登出</button>
+            </div>
+        </div>
+        
+        <!-- 配置区域 -->
+        <div class="config-section">
+            <h2 class="section-title">自动选择配置</h2>
+            <div class="form-group">
+                <label>视频下载地址（URL）前缀匹配（多个前缀用逗号分隔）:</label>
+                <input type="text" id="prefixInput" placeholder="例如: https://example.com/video1, https://example.com/video2">
+                <button class="btn btn-primary" onclick="addPrefix()" style="margin-top: 10px;">添加前缀</button>
+                <p style="font-size: 12px; color: #666; margin-top: 5px;">注意：匹配基于视频的下载地址（URL）前缀，而不是文件名</p>
+            </div>
+            <div class="prefix-list" id="prefixList"></div>
+            
+            <h2 class="section-title" style="margin-top: 20px;">视频名字前缀</h2>
+            <div class="form-group">
+                <label>视频名字前缀（会在所有解析出的视频名字前添加）:</label>
+                <input type="text" id="videoNamePrefixInput" placeholder="例如: [下载]">
+                <button class="btn btn-primary" onclick="saveVideoNamePrefix()" style="margin-top: 10px;">保存</button>
+            </div>
+        </div>
+        
+        <!-- 添加队列 -->
+        <div class="section">
+            <h2 class="section-title">添加解析任务</h2>
+            <div class="form-group">
+                <label>视频网页URL:</label>
+                <input type="text" id="queueUrlInput" placeholder="请输入视频网页URL">
+            </div>
+            <div class="form-group">
+                <label>优先级（数字越小优先级越高，默认999）:</label>
+                <input type="number" id="priorityInput" value="999" min="0">
+            </div>
+            <button class="btn btn-primary" onclick="addToQueue()">添加到队列</button>
+        </div>
+        
+        <!-- 解析队列 -->
+        <div class="section">
+            <h2 class="section-title">解析队列</h2>
+            <div class="queue-list" id="queueList">
+                <div class="empty-state">暂无任务</div>
+            </div>
+        </div>
+        
+        <!-- 解析历史 -->
+        <div class="section">
+            <h2 class="section-title">解析历史</h2>
+            <div class="history-list" id="historyList">
+                <div class="empty-state">暂无历史记录</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let refreshInterval = null;
+        
+        async function loadQueue() {
+            try {
+                const response = await fetch('/api/parse-queue');
+                const data = await response.json();
+                
+                const queueList = document.getElementById('queueList');
+                if (!data.queue || data.queue.length === 0) {
+                    queueList.innerHTML = '<div class="empty-state">暂无任务</div>';
+                    return;
+                }
+                
+                queueList.innerHTML = data.queue.map(task => {
+                    const status = task.status || 'pending';
+                    const statusText = {
+                        'pending': '等待中',
+                        'processing': '处理中',
+                        'completed': '已完成',
+                        'failed': '失败'
+                    }[status] || status;
+                    
+                    const created_at = task.created_at ? new Date(task.created_at * 1000).toLocaleString('zh-CN') : '-';
+                    
+                    return `
+                        <div class="queue-item">
+                            <div class="queue-item-info">
+                                <div class="queue-item-url">${task.url}</div>
+                                <div class="queue-item-meta">
+                                    优先级: ${task.priority} | 状态: <span class="status-badge status-${status}">${statusText}</span> | 创建时间: ${created_at}
+                                    ${task.error ? `<br>错误: ${task.error}` : ''}
+                                </div>
+                            </div>
+                            <div class="queue-item-actions">
+                                ${status === 'pending' ? `
+                                    <input type="number" class="priority-input" value="${task.priority}" onchange="updatePriority(${task.id}, this.value)">
+                                    <button class="btn btn-primary btn-small" onclick="updatePriority(${task.id}, document.querySelector('.priority-input[value=\\'${task.priority}\\']').value)">更新优先级</button>
+                                ` : ''}
+                                <button class="btn btn-danger btn-small" onclick="deleteQueue(${task.id})">删除</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('加载队列失败:', error);
+            }
+        }
+        
+        async function loadHistory() {
+            try {
+                const response = await fetch('/api/parse-history');
+                const data = await response.json();
+                
+                const historyList = document.getElementById('historyList');
+                if (!data.history || data.history.length === 0) {
+                    historyList.innerHTML = '<div class="empty-state">暂无历史记录</div>';
+                    return;
+                }
+                
+                historyList.innerHTML = data.history.map(record => {
+                    const parsed_at = record.parsed_at ? new Date(record.parsed_at * 1000).toLocaleString('zh-CN') : '-';
+                    const status = record.status || 'unknown';
+                    const videosCount = record.videos ? record.videos.length : 0;
+                    const selectedCount = record.selected_videos ? record.selected_videos.length : 0;
+                    
+                    return `
+                        <div class="history-item">
+                            <div class="queue-item-info">
+                                <div class="queue-item-url">${record.url}</div>
+                                <div class="queue-item-meta">
+                                    解析时间: ${parsed_at} | 
+                                    状态: <span class="status-badge status-${status}">${status === 'success' ? '成功' : '失败'}</span> | 
+                                    视频数: ${videosCount} | 
+                                    自动选择: ${selectedCount}
+                                    ${record.error ? `<br>错误: ${record.error}` : ''}
+                                    ${record.page_title ? `<br>页面标题: ${record.page_title}` : ''}
+                                </div>
+                                ${record.videos && record.videos.length > 0 ? `
+                                    <div style="margin-top: 10px;">
+                                        <strong>视频列表:</strong>
+                                        <ul style="margin-top: 5px; padding-left: 20px;">
+                                            ${record.videos.map(video => `
+                                                <li>
+                                                    <strong>${video.name}</strong> (${video.type})
+                                                    ${record.selected_videos && record.selected_videos.some(v => v.url === video.url) ? '<span style="color: green;">[已自动选择]</span>' : ''}
+                                                    <br>
+                                                    <span style="color: #666; font-size: 12px; word-break: break-all;">下载地址: ${video.url}</span>
+                                                    <button class="btn btn-primary btn-small" onclick="startDownloadFromHistory('${video.url}', '${video.name.replace(/'/g, "\\'")}', '${video.type}')" style="margin-left: 10px;">下载</button>
+                                                </li>
+                                            `).join('')}
+                                        </ul>
+                                    </div>
+                                ` : ''}
+                            </div>
+                            <div class="queue-item-actions">
+                                <button class="btn btn-danger btn-small" onclick="deleteHistory(${record.queue_id})">删除</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('加载历史失败:', error);
+            }
+        }
+        
+        async function addToQueue() {
+            const url = document.getElementById('queueUrlInput').value.trim();
+            const priority = parseInt(document.getElementById('priorityInput').value) || 999;
+            
+            if (!url) {
+                alert('请输入URL');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/parse-queue', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        priority: priority
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert('已添加到队列');
+                    document.getElementById('queueUrlInput').value = '';
+                    loadQueue();
+                } else {
+                    alert(data.error || '添加失败');
+                }
+            } catch (error) {
+                alert('添加失败: ' + error.message);
+            }
+        }
+        
+        async function deleteQueue(queueId) {
+            if (!confirm('确定要删除这个任务吗？')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/parse-queue/${queueId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadQueue();
+                } else {
+                    alert(data.error || '删除失败');
+                }
+            } catch (error) {
+                alert('删除失败: ' + error.message);
+            }
+        }
+        
+        async function updatePriority(queueId, priority) {
+            try {
+                const response = await fetch(`/api/parse-queue/${queueId}/priority`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        priority: parseInt(priority)
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadQueue();
+                } else {
+                    alert(data.error || '更新失败');
+                }
+            } catch (error) {
+                alert('更新失败: ' + error.message);
+            }
+        }
+        
+        // 从历史记录中启动下载
+        async function startDownloadFromHistory(videoUrl, videoName, videoType) {
+            try {
+                const response = await fetch('/api/download/manual', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: videoUrl,
+                        name: videoName,
+                        type: videoType
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert('下载任务已启动');
+                    // 跳转到下载管理页面
+                    window.location.href = '/downloads';
+                } else {
+                    alert(data.error || '启动下载失败');
+                }
+            } catch (error) {
+                alert('启动下载失败: ' + error.message);
+            }
+        }
+        
+        async function deleteHistory(queueId) {
+            if (!confirm('确定要删除这个历史记录吗？')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/parse-history/${queueId}`, {
+                    method: 'DELETE'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    loadHistory();
+                } else {
+                    alert(data.error || '删除失败');
+                }
+            } catch (error) {
+                alert('删除失败: ' + error.message);
+            }
+        }
+        
+        async function loadPrefixes() {
+            try {
+                const response = await fetch('/api/auto-select');
+                const data = await response.json();
+                
+                const prefixList = document.getElementById('prefixList');
+                if (data.prefixes && data.prefixes.length > 0) {
+                    prefixList.innerHTML = data.prefixes.map(prefix => `
+                        <span class="prefix-tag">
+                            ${prefix}
+                            <span class="remove" onclick="removePrefix('${prefix}')">×</span>
+                        </span>
+                    `).join('');
+                } else {
+                    prefixList.innerHTML = '<span style="color: #999;">暂无前缀</span>';
+                }
+            } catch (error) {
+                console.error('加载前缀失败:', error);
+            }
+        }
+        
+        async function addPrefix() {
+            const prefixInput = document.getElementById('prefixInput');
+            const prefixes = prefixInput.value.split(',').map(p => p.trim()).filter(p => p);
+            
+            if (prefixes.length === 0) {
+                alert('请输入前缀');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/auto-select', {
+                    method: 'GET'
+                });
+                const currentData = await response.json();
+                const currentPrefixes = currentData.prefixes || [];
+                
+                const newPrefixes = [...new Set([...currentPrefixes, ...prefixes])];
+                
+                const updateResponse = await fetch('/api/auto-select', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        prefixes: newPrefixes
+                    })
+                });
+                
+                const updateData = await updateResponse.json();
+                
+                if (updateResponse.ok) {
+                    prefixInput.value = '';
+                    loadPrefixes();
+                } else {
+                    alert(updateData.error || '添加失败');
+                }
+            } catch (error) {
+                alert('添加失败: ' + error.message);
+            }
+        }
+        
+        async function removePrefix(prefix) {
+            try {
+                const response = await fetch('/api/auto-select', {
+                    method: 'GET'
+                });
+                const data = await response.json();
+                const prefixes = data.prefixes || [];
+                
+                const newPrefixes = prefixes.filter(p => p !== prefix);
+                
+                const updateResponse = await fetch('/api/auto-select', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        prefixes: newPrefixes
+                    })
+                });
+                
+                if (updateResponse.ok) {
+                    loadPrefixes();
+                } else {
+                    alert('删除失败');
+                }
+            } catch (error) {
+                alert('删除失败: ' + error.message);
+            }
+        }
+        
+        async function loadVideoNamePrefix() {
+            try {
+                const response = await fetch('/api/video-name-prefix');
+                const data = await response.json();
+                document.getElementById('videoNamePrefixInput').value = data.prefix || '';
+            } catch (error) {
+                console.error('加载视频名字前缀失败:', error);
+            }
+        }
+        
+        async function saveVideoNamePrefix() {
+            const prefix = document.getElementById('videoNamePrefixInput').value.trim();
+            
+            try {
+                const response = await fetch('/api/video-name-prefix', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        prefix: prefix
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    alert('保存成功');
+                } else {
+                    alert(data.error || '保存失败');
+                }
+            } catch (error) {
+                alert('保存失败: ' + error.message);
+            }
+        }
+        
+        async function logout() {
+            try {
+                const response = await fetch('/logout', {
+                    method: 'POST'
+                });
+                window.location.href = '/login';
+            } catch (error) {
+                window.location.href = '/login';
+            }
+        }
+        
+        function startAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            refreshInterval = setInterval(() => {
+                loadQueue();
+                loadHistory();
+            }, 3000); // 每3秒刷新一次
+        }
+        
+        window.addEventListener('load', () => {
+            loadQueue();
+            loadHistory();
+            loadPrefixes();
+            loadVideoNamePrefix();
+            startAutoRefresh();
+        });
+        
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
+

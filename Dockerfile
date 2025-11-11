@@ -83,8 +83,11 @@ RUN python -m playwright install chromium || \
 COPY app.py .
 COPY templates/ templates/
 
-# 创建必要的目录
-RUN mkdir -p templates static
+# 创建必要的目录（使用绝对路径，确保在/app目录下）
+RUN mkdir -p /app/templates /app/static /app/downloads /app/downloads/temp
+
+# 设置下载目录权限（允许应用写入）
+RUN chmod -R 777 /app/downloads || true
 
 # 暴露端口
 EXPOSE 5000
