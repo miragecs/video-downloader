@@ -1,0 +1,44 @@
+name: peaceful_tony
+services:
+  main_app:
+    cpu_shares: 10
+    command: []
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      - ADMIN_PASSWORD=18810917798CtX
+      - ADMIN_USERNAME=mirage
+      - DOWNLOAD_DIR=/DATA/Downloads
+      - FLASK_ENV=production
+    image: video-downloader2:latest
+    labels:
+      icon: https://icon.casaos.io/main/all/video-downloader2.png
+    ports:
+      - target: 5000
+        published: "5001"
+        protocol: tcp
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: /mnt/Storage1/下载/download
+        target: /DATA/Downloads
+    devices: []
+    cap_add: []
+    network_mode: bridge
+    privileged: false
+    container_name: ""
+    hostname: ""
+x-casaos:
+  author: self
+  category: self
+  hostname: 192.168.1.52
+  icon: https://icon.casaos.io/main/all/video-downloader2.png
+  index: /
+  is_uncontrolled: false
+  port_map: "5001"
+  scheme: http
+  store_app_id: peaceful_tony
+  title:
+    custom: video-downloader2

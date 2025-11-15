@@ -6,8 +6,9 @@ import json
 import time
 import os
 import threading
+import gc  # 用于垃圾回收，防止内存泄漏
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
 import hashlib
 from pathlib import Path
 import shutil
@@ -64,8 +65,470 @@ if 'DISPLAY' not in os.environ:
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 
 
+# 浏览器实例管理（防止内存泄漏）
+_browser_instances = {}  # 存储浏览器实例
+_browser_lock = threading.Lock()
+MAX_BROWSER_INSTANCES = int(os.environ.get('MAX_BROWSER_INSTANCES', '2'))  # 限制并发浏览器实例数
+
+
+def extract_real_m3u8_from_url(url):
+    """从URL中提取真实的m3u8地址（如果URL参数中包含m3u8地址）"""
+    try:
+        from urllib.parse import parse_qs
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        
+        # 常见的m3u8参数名（按优先级排序）
+        m3u8_param_names = ['url', 'm3u8', 'src', 'source', 'video', 'stream', 'play', 'file', 'link', 'path', 'v', 'u', 's']
+        for param_name in m3u8_param_names:
+            if param_name in query_params:
+                param_value = query_params[param_name][0] if isinstance(query_params[param_name], list) else query_params[param_name]
+                # URL解码（可能需要多次解码）
+                for _ in range(3):  # 最多解码3次（处理多重编码）
+                    try:
+                        decoded = unquote(param_value)
+                        if decoded == param_value:
+                            break
+                        param_value = decoded
+                    except:
+                        break
+                
+                # 检查是否是m3u8 URL
+                if '.m3u8' in param_value.lower() or 'm3u8' in param_value.lower():
+                    if param_value.startswith('http://') or param_value.startswith('https://'):
+                        print(f"从URL参数 '{param_name}' 中提取到真实M3U8地址: {param_value[:100]}...")
+                        return param_value
+                    else:
+                        # 相对路径，构建完整URL
+                        base_url_parsed = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                        real_url = urljoin(base_url_parsed, param_value)
+                        print(f"从URL参数 '{param_name}' 中提取到真实M3U8地址（相对路径）: {real_url[:100]}...")
+                        return real_url
+        
+        # 检查URL fragment（#后面的部分）
+        if parsed_url.fragment:
+            fragment = unquote(parsed_url.fragment)
+            if '.m3u8' in fragment.lower():
+                # 尝试从fragment中提取URL
+                fragment_url_match = re.search(r'(https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*)', fragment, re.IGNORECASE)
+                if fragment_url_match:
+                    real_url = fragment_url_match.group(1)
+                    print(f"从URL fragment中提取到真实M3U8地址: {real_url[:100]}...")
+                    return real_url
+                elif fragment.startswith('http://') or fragment.startswith('https://'):
+                    print(f"从URL fragment中提取到真实M3U8地址: {fragment[:100]}...")
+                    return fragment
+    except Exception as e:
+        print(f"提取真实M3U8地址时出错: {e}")
+    
+    # 如果没有找到，返回原URL
+    return url
+
+
+def recursively_parse_m3u8_with_playwright(page, m3u8_url, max_depth=3, current_depth=0, visited_urls=None, all_urls=None):
+    """使用Playwright递归解析m3u8 URL，提取所有嵌套的m3u8地址
+    
+    解析逻辑：
+    1. 先检查URL是否是参数形式，如果是则提取真实地址
+    2. 访问URL获取内容
+    3. 如果是真正的m3u8文件，检查内容中是否有嵌套的m3u8地址
+    4. 如果是HTML，从中提取m3u8地址
+    5. 递归处理所有找到的地址
+    6. 所有地址都添加到列表供用户选择
+    
+    Args:
+        page: Playwright页面对象
+        m3u8_url: 要解析的m3u8 URL
+        max_depth: 最大递归深度
+        current_depth: 当前递归深度
+        visited_urls: 已访问的URL集合
+        all_urls: 存储所有找到的URL的列表
+    
+    Returns:
+        找到的所有m3u8 URL列表
+    """
+    if visited_urls is None:
+        visited_urls = set()
+    if all_urls is None:
+        all_urls = []
+    
+    # 防止无限递归
+    if current_depth >= max_depth:
+        print(f"达到最大递归深度 {max_depth}，停止解析: {m3u8_url[:100]}...")
+        return all_urls
+    
+    # 防止循环
+    if m3u8_url in visited_urls:
+        print(f"检测到循环URL，停止解析: {m3u8_url[:100]}...")
+        return all_urls
+    
+    visited_urls.add(m3u8_url)
+    
+    try:
+        print(f"开始解析M3U8 URL (深度 {current_depth}): {m3u8_url[:100]}...")
+        
+        # 步骤1: 检查URL是否是参数形式，如果是则提取真实地址
+        extracted_url = extract_real_m3u8_from_url(m3u8_url)
+        
+        # 如果提取到了不同的URL，说明是参数形式，需要递归解析真实地址
+        if extracted_url != m3u8_url:
+            print(f"从URL参数中提取到真实地址: {extracted_url[:100]}...")
+            # 将原始URL添加到列表（用户可能也需要）
+            if m3u8_url not in [u['url'] for u in all_urls]:
+                all_urls.append({
+                    'url': m3u8_url,
+                    'type': 'M3U8',
+                    'content_type': 'application/vnd.apple.mpegurl',
+                    'source': f'param_extracted_{current_depth}',
+                    'depth': current_depth
+                })
+            # 递归解析提取出的真实地址
+            recursively_parse_m3u8_with_playwright(
+                page, extracted_url, max_depth, current_depth + 1, visited_urls, all_urls
+            )
+            return all_urls
+        
+        # 步骤2: 获取m3u8文件内容（优先使用requests，更可靠）
+        try:
+            # 方法1: 使用requests直接获取（更可靠，适合m3u8文本文件）
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': m3u8_url
+            }
+            
+            try:
+                http_response = requests.get(m3u8_url, headers=headers, timeout=15, verify=False, allow_redirects=True)
+                http_response.raise_for_status()
+                content = http_response.text
+                print(f"使用requests成功获取M3U8内容 ({len(content)} 字节): {m3u8_url[:100]}...")
+            except Exception as req_error:
+                print(f"使用requests获取失败，尝试使用Playwright: {req_error}")
+                # 方法2: 如果requests失败，使用Playwright（可能页面需要JavaScript）
+                try:
+                    response = page.goto(m3u8_url, wait_until="networkidle", timeout=30000)
+                    if not response:
+                        print(f"无法访问M3U8 URL: {m3u8_url[:100]}...")
+                        if m3u8_url not in [u['url'] for u in all_urls]:
+                            all_urls.append({
+                                'url': m3u8_url,
+                                'type': 'M3U8',
+                                'content_type': 'application/vnd.apple.mpegurl',
+                                'source': f'failed_{current_depth}',
+                                'depth': current_depth
+                            })
+                        return all_urls
+                    
+                    # 等待一下，确保JavaScript执行完成
+                    time.sleep(1)
+                    
+                    # 获取响应内容
+                    try:
+                        content = response.text()
+                    except:
+                        # 如果无法获取文本，尝试从页面获取
+                        try:
+                            content = page.content()
+                        except:
+                            print(f"无法获取M3U8内容: {m3u8_url[:100]}...")
+                            if m3u8_url not in [u['url'] for u in all_urls]:
+                                all_urls.append({
+                                    'url': m3u8_url,
+                                    'type': 'M3U8',
+                                    'content_type': 'application/vnd.apple.mpegurl',
+                                    'source': f'no_content_{current_depth}',
+                                    'depth': current_depth
+                                })
+                            return all_urls
+                except Exception as pw_error:
+                    print(f"使用Playwright获取也失败: {pw_error}")
+                    if m3u8_url not in [u['url'] for u in all_urls]:
+                        all_urls.append({
+                            'url': m3u8_url,
+                            'type': 'M3U8',
+                            'content_type': 'application/vnd.apple.mpegurl',
+                            'source': f'error_{current_depth}',
+                            'depth': current_depth
+                        })
+                    return all_urls
+            
+            # 如果内容很小，可能是重定向或需要JavaScript执行，尝试从页面中提取
+            if len(content) < 1000:
+                print(f"M3U8响应内容很小 ({len(content)} 字节)，可能是HTML或需要JavaScript执行，尝试从页面提取...")
+                try:
+                    # 尝试执行JavaScript获取页面中的所有m3u8 URL
+                    js_m3u8_urls = page.evaluate("""
+                        () => {
+                            const urls = [];
+                            // 查找所有包含m3u8的链接
+                            document.querySelectorAll('a[href*="m3u8"], script, meta, link').forEach(el => {
+                                const href = el.href || el.src || el.content || '';
+                                if (href.includes('m3u8')) {
+                                    urls.push(href);
+                                }
+                            });
+                            // 查找页面文本中的m3u8 URL
+                            const text = document.body.innerText || document.body.textContent || '';
+                            const urlRegex = /https?:\/\/[^\s"']+\.m3u8[^\s"']*/gi;
+                            const matches = text.match(urlRegex);
+                            if (matches) {
+                                urls.push(...matches);
+                            }
+                            return [...new Set(urls)];
+                        }
+                    """)
+                    
+                    if js_m3u8_urls:
+                        print(f"通过JavaScript找到 {len(js_m3u8_urls)} 个m3u8 URL")
+                        for js_url in js_m3u8_urls:
+                            if js_url and js_url not in [u['url'] for u in all_urls]:
+                                print(f"从JavaScript提取到M3U8 URL: {js_url[:150]}...")
+                                # 递归解析这个URL
+                                recursively_parse_m3u8_with_playwright(
+                                    page, js_url, max_depth, current_depth + 1, visited_urls, all_urls
+                                )
+                except Exception as e:
+                    print(f"从JavaScript提取m3u8 URL时出错: {e}")
+        except Exception as e:
+            print(f"访问M3U8 URL时出错: {e}")
+            # 即使出错，也添加到列表
+            if m3u8_url not in [u['url'] for u in all_urls]:
+                all_urls.append({
+                    'url': m3u8_url,
+                    'type': 'M3U8',
+                    'content_type': 'application/vnd.apple.mpegurl',
+                    'source': f'error_{current_depth}',
+                    'depth': current_depth
+                })
+            return all_urls
+        
+        # 步骤3: 检查是否是真正的m3u8文件
+        if content.strip().startswith('#EXTM3U'):
+            print(f"找到真实的M3U8文件: {m3u8_url[:100]}...")
+            
+            # 将当前URL添加到列表
+            if m3u8_url not in [u['url'] for u in all_urls]:
+                all_urls.append({
+                    'url': m3u8_url,
+                    'type': 'M3U8',
+                    'content_type': 'application/vnd.apple.mpegurl',
+                    'source': f'm3u8_file_{current_depth}',
+                    'depth': current_depth
+                })
+            
+            # 步骤4: 解析m3u8内容，查找嵌套的m3u8地址
+            nested_urls = []
+            
+            # 模式1: #EXT-X-STREAM-INF后面跟着URL（保留完整URL，包括参数）
+            stream_inf_pattern = r'#EXT-X-STREAM-INF[^\n]*\n([^\n]+\.m3u8[^\n]*)'
+            stream_matches = re.findall(stream_inf_pattern, content, re.IGNORECASE | re.MULTILINE)
+            for match in stream_matches:
+                match = match.strip()
+                if match and match not in nested_urls:
+                    nested_urls.append(match)  # 保留完整URL，包括查询参数
+            
+            # 模式2: 查找所有包含.m3u8的行（排除注释行），保留完整URL
+            for line in content.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if '.m3u8' in line.lower():
+                        # 保留完整URL，包括查询参数和片段（这些参数可能是必需的）
+                        # 只清理行首尾的空白字符，保留URL的完整内容
+                        clean_line = line.strip()
+                        # 移除可能的控制字符和换行符
+                        clean_line = clean_line.replace('\r', '').replace('\n', '').replace('\t', ' ')
+                        # 如果包含空格，可能是URL后面有其他内容，只取URL部分
+                        if ' ' in clean_line:
+                            # 尝试提取URL部分（URL通常不包含空格）
+                            url_part = clean_line.split()[0]
+                            if '.m3u8' in url_part.lower():
+                                clean_line = url_part
+                        if clean_line and clean_line not in nested_urls:
+                            nested_urls.append(clean_line)
+            
+            # 模式3: 查找URL中的m3u8参数（即使行本身不包含.m3u8）
+            # 有些m3u8文件可能包含类似 "url=https://...m3u8" 的格式
+            url_param_pattern = r'(?:url|src|source|video|stream|play|file|link|path|m3u8)=([^\s\n]+\.m3u8[^\s\n]*)'
+            param_matches = re.findall(url_param_pattern, content, re.IGNORECASE)
+            for match in param_matches:
+                match = match.strip()
+                if match and match not in nested_urls:
+                    nested_urls.append(match)
+            
+            # 模式4: 查找所有完整的http(s)://...m3u8 URL（即使不在单独的行中）
+            full_url_pattern = r'https?://[^\s\n"\'<>]+\.m3u8[^\s\n"\'<>]*'
+            full_url_matches = re.findall(full_url_pattern, content, re.IGNORECASE)
+            for match in full_url_matches:
+                match = match.strip()
+                if match and match not in nested_urls:
+                    nested_urls.append(match)
+            
+            # 步骤5: 递归处理所有嵌套的m3u8地址
+            if nested_urls:
+                print(f"在M3U8文件中发现 {len(nested_urls)} 个嵌套的M3U8地址，开始递归解析...")
+                print(f"M3U8文件内容预览（前500字符）: {content[:500]}")
+                for nested_url_str in nested_urls:
+                    print(f"处理嵌套URL: {nested_url_str[:150]}...")
+                    
+                    # 构建完整URL（保留查询参数和片段）
+                    if nested_url_str.startswith('http://') or nested_url_str.startswith('https://'):
+                        nested_url = nested_url_str  # 已经是完整URL，直接使用
+                    elif nested_url_str.startswith('/') or nested_url_str.startswith('./'):
+                        # 绝对路径或相对路径
+                        base_url_parsed = f"{urlparse(m3u8_url).scheme}://{urlparse(m3u8_url).netloc}"
+                        nested_url = urljoin(base_url_parsed, nested_url_str)
+                    else:
+                        # 相对路径（不包含/开头，如 "2000k/hls/mixed.m3u8"）
+                        # 需要基于当前m3u8 URL的目录来构建
+                        base_url_parsed = '/'.join(m3u8_url.split('/')[:-1]) + '/'
+                        # 确保base_url以/结尾
+                        if not base_url_parsed.endswith('/'):
+                            base_url_parsed += '/'
+                        nested_url = urljoin(base_url_parsed, nested_url_str)
+                        print(f"相对路径转换: {nested_url_str} -> {nested_url[:150]}...")
+                    
+                    print(f"构建的完整嵌套URL: {nested_url[:150]}...")
+                    
+                    # 递归解析嵌套地址
+                    recursively_parse_m3u8_with_playwright(
+                        page, nested_url, max_depth, current_depth + 1, visited_urls, all_urls
+                    )
+            else:
+                # 如果没有找到嵌套地址，但文件很小（可能是主播放列表），尝试更深入的解析
+                content_size = len(content)
+                print(f"M3U8文件大小: {content_size} 字节")
+                # 打印完整内容以便调试
+                print(f"M3U8文件完整内容:\n{content}")
+                
+                # 对于任何大小的m3u8文件，如果没有找到嵌套地址，都尝试深度解析
+                # 因为有些m3u8文件可能格式特殊
+                if not nested_urls:
+                    print(f"未找到嵌套地址，尝试深度解析...")
+                    
+                    # 尝试查找所有可能的URL模式（更宽泛）
+                    all_url_patterns = [
+                        r'https?://[^\s\n"\'<>]+\.m3u8[^\s\n"\'<>]*',  # 完整的http(s) m3u8 URL
+                        r'/[^\s\n"\'<>]+\.m3u8[^\s\n"\'<>]*',  # 绝对路径m3u8
+                        r'\./[^\s\n"\'<>]+\.m3u8[^\s\n"\'<>]*',  # 相对路径m3u8（./开头）
+                        r'[a-zA-Z0-9_\-/]+/[^\s\n"\'<>]*\.m3u8[^\s\n"\'<>]*',  # 相对路径（如 2000k/hls/mixed.m3u8）
+                        r'[^\s\n"\'<>]+\.m3u8[^\s\n"\'<>]*',  # 任何包含.m3u8的字符串
+                    ]
+                    
+                    for pattern in all_url_patterns:
+                        matches = re.findall(pattern, content, re.IGNORECASE)
+                        for match in matches:
+                            match = match.strip()
+                            # 移除可能的控制字符
+                            match = match.replace('\r', '').replace('\n', '').replace('\t', ' ')
+                            # 如果包含空格，只取第一部分
+                            if ' ' in match:
+                                match = match.split()[0]
+                            if '.m3u8' in match.lower() and match not in nested_urls:
+                                print(f"通过深度解析找到可能的m3u8地址: {match[:150]}...")
+                                nested_urls.append(match)
+                    
+                    # 如果找到了新的地址，递归处理
+                    if nested_urls:
+                        print(f"通过深度解析发现 {len(nested_urls)} 个可能的M3U8地址，开始递归解析...")
+                        for nested_url_str in nested_urls:
+                            print(f"处理深度解析找到的URL: {nested_url_str[:150]}...")
+                            if nested_url_str.startswith('http://') or nested_url_str.startswith('https://'):
+                                nested_url = nested_url_str
+                            elif nested_url_str.startswith('/') or nested_url_str.startswith('./'):
+                                base_url_parsed = f"{urlparse(m3u8_url).scheme}://{urlparse(m3u8_url).netloc}"
+                                nested_url = urljoin(base_url_parsed, nested_url_str)
+                            else:
+                                # 相对路径（如 2000k/hls/mixed.m3u8）
+                                base_url_parsed = '/'.join(m3u8_url.split('/')[:-1]) + '/'
+                                if not base_url_parsed.endswith('/'):
+                                    base_url_parsed += '/'
+                                nested_url = urljoin(base_url_parsed, nested_url_str)
+                                print(f"相对路径转换: {nested_url_str} -> {nested_url[:150]}...")
+                            
+                            recursively_parse_m3u8_with_playwright(
+                                page, nested_url, max_depth, current_depth + 1, visited_urls, all_urls
+                            )
+        else:
+            # 步骤6: 如果不是m3u8文件，可能是HTML，尝试从中提取
+            print(f"M3U8 URL返回的不是M3U8文件，尝试从内容中提取: {m3u8_url[:100]}...")
+            
+            # 将当前URL添加到列表（即使不是m3u8文件）
+            if m3u8_url not in [u['url'] for u in all_urls]:
+                all_urls.append({
+                    'url': m3u8_url,
+                    'type': 'M3U8',
+                    'content_type': 'text/html',
+                    'source': f'html_{current_depth}',
+                    'depth': current_depth
+                })
+            
+            # 从HTML中提取m3u8 URL
+            m3u8_patterns = [
+                r'(?:url|src|source|video|stream|play|file|link|path|m3u8)["\']?\s*[:=]\s*["\']([^"\']*\.m3u8[^"\']*)["\']',
+                r'["\']([^"\']*\.m3u8[^"\']*)["\']',
+                r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>?&]*',
+            ]
+            
+            for pattern in m3u8_patterns:
+                matches = re.findall(pattern, content, re.IGNORECASE)
+                for match in matches:
+                    if isinstance(match, tuple):
+                        match = match[0] if match else ''
+                    if not match:
+                        continue
+                    
+                    # URL解码
+                    for _ in range(3):
+                        try:
+                            decoded = unquote(match)
+                            if decoded == match:
+                                break
+                            match = decoded
+                        except:
+                            break
+                    
+                    # 清理转义字符
+                    match = match.replace('\\/', '/').replace('\\"', '"').replace("\\'", "'")
+                    
+                    if '.m3u8' in match.lower():
+                        # 构建完整URL
+                        if match.startswith('http://') or match.startswith('https://'):
+                            new_url = match
+                        elif match.startswith('/') or match.startswith('./'):
+                            base_url_parsed = f"{urlparse(m3u8_url).scheme}://{urlparse(m3u8_url).netloc}"
+                            new_url = urljoin(base_url_parsed, match)
+                        else:
+                            base_url_parsed = f"{urlparse(m3u8_url).scheme}://{urlparse(m3u8_url).netloc}"
+                            new_url = urljoin(base_url_parsed, '/' + match.lstrip('/'))
+                        
+                        # 递归解析
+                        recursively_parse_m3u8_with_playwright(
+                            page, new_url, max_depth, current_depth + 1, visited_urls, all_urls
+                        )
+                if matches:  # 找到一个就够了，继续递归会找到更多
+                    break
+        
+    except Exception as e:
+        print(f"解析M3U8 URL时出错: {e}")
+        import traceback
+        traceback.print_exc()
+        # 即使出错，也添加到列表
+        if m3u8_url not in [u['url'] for u in all_urls]:
+            all_urls.append({
+                'url': m3u8_url,
+                'type': 'M3U8',
+                'content_type': 'application/vnd.apple.mpegurl',
+                'source': f'exception_{current_depth}',
+                'depth': current_depth
+            })
+    
+    return all_urls
+
+
 def extract_video_from_network_requests(url):
-    """通过Playwright捕获网络请求来获取所有视频链接（包括m3u8和其他视频格式）"""
+    """通过Playwright捕获网络请求来获取所有视频链接（包括m3u8和其他视频格式）
+    使用轻量级配置和防内存泄漏措施"""
     video_urls = []  # 存储所有视频URL，格式: {'url': url, 'type': type, 'content_type': content_type}
     page_title = "未知视频"
     
@@ -83,228 +546,380 @@ def extract_video_from_network_requests(url):
     try:
         from playwright.sync_api import sync_playwright
         
-        print(f"使用Playwright获取视频链接...")
+        print(f"使用Playwright（轻量级配置）获取视频链接...")
         
-        with sync_playwright() as p:
-            # 启动浏览器（headless模式，适用于无GUI系统）
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--single-process',
-                ]
-            )
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1920, 'height': 1080}
-            )
-            page = context.new_page()
-            
-            # 收集所有网络请求和响应中的视频链接
-            captured_urls = {}  # 使用字典存储，key为URL，value为{'type': type, 'content_type': content_type}
-            
-            def handle_request(request):
-                """捕获请求URL"""
-                request_url = request.url
-                # 检查URL是否包含视频扩展名
-                url_lower = request_url.lower()
-                for ext in video_extensions:
-                    if ext in url_lower:
-                        # 根据扩展名判断视频类型
-                        video_type = ext.replace('.', '').upper()
-                        if ext == '.m3u8':
-                            video_type = 'M3U8'
-                        elif ext == '.ts':
-                            video_type = 'TS'
-                        captured_urls[request_url] = {
-                            'type': video_type,
-                            'content_type': None,  # 请求时还没有content-type
-                            'source': 'request'
-                        }
-                        print(f"从请求中捕获视频URL: {request_url[:100]}... (类型: {video_type})")
-                        break
-            
-            def handle_response(response):
-                """捕获响应URL和Content-Type"""
-                response_url = response.url
-                try:
-                    content_type = response.headers.get('content-type', '')
-                    content_type_lower = content_type.lower() if content_type else ''
-                    
-                    # 检查Content-Type是否是视频类型
-                    is_video = False
-                    video_type = None
-                    
-                    # 检查是否是视频Content-Type
-                    for vct in video_content_types:
-                        if vct in content_type_lower:
-                            is_video = True
-                            if 'mpegurl' in content_type_lower or 'm3u8' in content_type_lower:
+        browser = None
+        context = None
+        page = None
+        
+        try:
+            with sync_playwright() as p:
+                # 启动浏览器（headless模式，使用轻量级配置以减少内存占用）
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu',
+                        '--disable-software-rasterizer',
+                        '--disable-extensions',
+                        '--no-first-run',
+                        '--no-zygote',
+                        '--single-process',  # 单进程模式，减少内存占用
+                        '--disable-background-networking',  # 禁用后台网络
+                        '--disable-background-timer-throttling',  # 禁用后台定时器节流
+                        '--disable-backgrounding-occluded-windows',  # 禁用被遮挡窗口的后台处理
+                        '--disable-breakpad',  # 禁用崩溃报告
+                        '--disable-client-side-phishing-detection',  # 禁用客户端钓鱼检测
+                        '--disable-default-apps',  # 禁用默认应用
+                        '--disable-features=TranslateUI,BlinkGenPropertyTrees',  # 禁用不需要的功能
+                        '--disable-hang-monitor',  # 禁用挂起监控
+                        '--disable-ipc-flooding-protection',  # 禁用IPC洪水保护
+                        '--disable-popup-blocking',  # 禁用弹窗阻止
+                        '--disable-prompt-on-repost',  # 禁用重新提交提示
+                        '--disable-renderer-backgrounding',  # 禁用渲染器后台处理
+                        '--disable-sync',  # 禁用同步
+                        '--disable-translate',  # 禁用翻译
+                        '--metrics-recording-only',  # 仅记录指标
+                        '--no-default-browser-check',  # 不检查默认浏览器
+                        '--no-pings',  # 禁用ping
+                        '--safebrowsing-disable-auto-update',  # 禁用安全浏览自动更新
+                        '--enable-automation',  # 启用自动化
+                        '--password-store=basic',  # 使用基本密码存储
+                        '--use-mock-keychain',  # 使用模拟密钥链
+                        '--memory-pressure-off',  # 关闭内存压力检测
+                        '--max_old_space_size=256',  # 限制V8内存使用（MB）
+                        '--disable-web-security',  # 禁用Web安全（仅用于自动化）
+                        '--disable-features=IsolateOrigins,site-per-process',  # 禁用站点隔离
+                    ]
+                )
+                
+                # 创建浏览器上下文（使用轻量级配置）
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1280, 'height': 720},  # 减小视口大小以节省内存
+                    ignore_https_errors=True,
+                    java_script_enabled=True,
+                    # 禁用不必要的功能
+                    bypass_csp=True,
+                    # 不加载图片和字体以节省内存
+                    no_viewport=False,
+                )
+                
+                page = context.new_page()
+                
+                # 收集所有网络请求和响应中的视频链接
+                captured_urls = {}  # 使用字典存储，key为URL，value为{'type': type, 'content_type': content_type}
+                
+                def handle_request(request):
+                    """捕获请求URL"""
+                    request_url = request.url
+                    # 检查URL是否包含视频扩展名
+                    url_lower = request_url.lower()
+                    for ext in video_extensions:
+                        if ext in url_lower:
+                            # 根据扩展名判断视频类型
+                            video_type = ext.replace('.', '').upper()
+                            if ext == '.m3u8':
                                 video_type = 'M3U8'
-                            elif 'mp4' in content_type_lower:
-                                video_type = 'MP4'
-                            elif 'webm' in content_type_lower:
-                                video_type = 'WEBM'
-                            elif 'quicktime' in content_type_lower or 'mov' in content_type_lower:
-                                video_type = 'MOV'
+                                # 对于m3u8 URL，先添加到捕获列表
+                                captured_urls[request_url] = {
+                                    'type': video_type,
+                                    'content_type': None,  # 请求时还没有content-type
+                                    'source': 'request'
+                                }
+                                print(f"从请求中捕获M3U8 URL: {request_url[:100]}...")
+                                
+                                # 使用Playwright递归解析，提取所有嵌套的m3u8地址
+                                try:
+                                    nested_urls = recursively_parse_m3u8_with_playwright(page, request_url)
+                                    for nested_info in nested_urls:
+                                        nested_url = nested_info['url']
+                                        if nested_url not in captured_urls:
+                                            captured_urls[nested_url] = {
+                                                'type': 'M3U8',
+                                                'content_type': nested_info.get('content_type', 'application/vnd.apple.mpegurl'),
+                                                'source': f"nested_{nested_info.get('depth', 0)}"
+                                            }
+                                            print(f"发现嵌套的M3U8地址 (深度 {nested_info.get('depth', 0)}): {nested_url[:100]}...")
+                                except Exception as e:
+                                    print(f"递归解析M3U8 URL时出错: {e}")
+                                    import traceback
+                                    traceback.print_exc()
+                            elif ext == '.ts':
+                                video_type = 'TS'
+                                captured_urls[request_url] = {
+                                    'type': video_type,
+                                    'content_type': None,  # 请求时还没有content-type
+                                    'source': 'request'
+                                }
+                                print(f"从请求中捕获视频URL: {request_url[:100]}... (类型: {video_type})")
                             else:
-                                video_type = content_type.split('/')[1].upper() if '/' in content_type else 'VIDEO'
+                                captured_urls[request_url] = {
+                                    'type': video_type,
+                                    'content_type': None,  # 请求时还没有content-type
+                                    'source': 'request'
+                                }
+                                print(f"从请求中捕获视频URL: {request_url[:100]}... (类型: {video_type})")
                             break
-                    
-                    # 如果没有通过Content-Type识别，检查URL扩展名
-                    if not is_video:
-                        url_lower = response_url.lower()
-                        for ext in video_extensions:
-                            if ext in url_lower:
-                                is_video = True
-                                video_type = ext.replace('.', '').upper()
-                                if ext == '.m3u8':
-                                    video_type = 'M3U8'
-                                elif ext == '.ts':
-                                    video_type = 'TS'
-                                break
-                    
-                    if is_video:
-                        # 如果URL已存在，更新content-type；否则添加新URL
-                        if response_url in captured_urls:
-                            captured_urls[response_url]['content_type'] = content_type
-                        else:
-                            captured_urls[response_url] = {
-                                'type': video_type or 'VIDEO',
-                                'content_type': content_type,
-                                'source': 'response'
-                            }
-                        print(f"从响应中捕获视频URL: {response_url[:100]}... (类型: {video_type or 'VIDEO'}, Content-Type: {content_type})")
+                
+                def handle_response(response):
+                    """捕获响应URL和Content-Type"""
+                    response_url = response.url
+                    try:
+                        content_type = response.headers.get('content-type', '')
+                        content_type_lower = content_type.lower() if content_type else ''
                         
-                except Exception as e:
-                    print(f"处理响应时出错: {e}")
-            
-            # 注册请求和响应处理器
-            page.on("request", handle_request)
-            page.on("response", handle_response)
-            
-            # 过滤资源以加快加载（只加载必要的资源）
-            def handle_route(route):
-                """过滤资源，只加载必要的资源"""
-                resource_type = route.request.resource_type
-                # 允许文档、脚本、样式表、xhr、fetch、websocket、media（视频、音频）
-                if resource_type in ['document', 'script', 'stylesheet', 'xhr', 'fetch', 'websocket', 'media']:
-                    route.continue_()
-                # 阻止图片、字体等
-                elif resource_type in ['image', 'font', 'texttrack']:
-                    route.abort()
-                else:
-                    route.continue_()
-            
-            try:
-                page.route("**/*", handle_route)
-                print("已启用资源过滤以加快加载")
-            except:
-                print("资源过滤启用失败，继续执行...")
-            
-            try:
-                # 访问页面 - 使用更实用的等待策略
-                print(f"正在访问页面: {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                print("页面DOM加载完成")
-                
-                # 等待JavaScript执行
-                time.sleep(3)
-                
-                # 尝试关闭弹窗
-                try:
-                    page.evaluate("""
-                        () => {
-                            // 关闭常见的弹窗
-                            const popups = document.querySelectorAll('.ds-pop, [class*="ds-pop"], .pop-overlay, .modal-overlay, .overlay, [class*="overlay"], .modal, .popup, [class*="modal"], [class*="popup"]');
-                            popups.forEach(popup => {
-                                if (popup) {
-                                    popup.style.display = 'none';
-                                    popup.remove();
-                                }
-                            });
-                            
-                            // 关闭通知
-                            const notices = document.querySelectorAll('#notice, [id*="notice"]');
-                            notices.forEach(notice => {
-                                if (notice) {
-                                    notice.style.display = 'none';
-                                    notice.remove();
-                                }
-                            });
-                            
-                            // 触发ESC键
-                            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27 }));
-                            document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', keyCode: 27 }));
-                        }
-                    """)
-                    print("已尝试关闭弹窗")
-                except Exception as e:
-                    print(f"关闭弹窗时出错: {e}")
-                
-                # 尝试点击播放按钮
-                try:
-                    play_button = page.query_selector('button[class*="play"], .play-button, [id*="play"], video')
-                    if play_button:
-                        print("找到播放按钮，尝试点击...")
-                        try:
-                            play_button.click(timeout=5000)
-                            print("播放按钮点击成功")
-                            time.sleep(2)
-                        except:
-                            # 如果普通点击失败，尝试强制点击
-                            try:
-                                page.evaluate("""
-                                    () => {
-                                        const playBtn = document.querySelector('button[class*="play"], .play-button, [id*="play"], video');
-                                        if (playBtn) {
-                                            playBtn.click();
+                        # 检查Content-Type是否是视频类型
+                        is_video = False
+                        video_type = None
+                        
+                        # 检查是否是视频Content-Type
+                        for vct in video_content_types:
+                            if vct in content_type_lower:
+                                is_video = True
+                                if 'mpegurl' in content_type_lower or 'm3u8' in content_type_lower:
+                                    video_type = 'M3U8'
+                                    # 对于m3u8 URL，先添加到捕获列表
+                                    if response_url not in captured_urls:
+                                        captured_urls[response_url] = {
+                                            'type': video_type,
+                                            'content_type': content_type,
+                                            'source': 'response'
                                         }
+                                        print(f"从响应中捕获M3U8 URL: {response_url[:100]}...")
+                                    
+                                    # 使用Playwright递归解析，提取所有嵌套的m3u8地址
+                                    try:
+                                        nested_urls = recursively_parse_m3u8_with_playwright(page, response_url)
+                                        for nested_info in nested_urls:
+                                            nested_url = nested_info['url']
+                                            if nested_url not in captured_urls:
+                                                captured_urls[nested_url] = {
+                                                    'type': 'M3U8',
+                                                    'content_type': nested_info.get('content_type', 'application/vnd.apple.mpegurl'),
+                                                    'source': f"nested_{nested_info.get('depth', 0)}"
+                                                }
+                                                print(f"发现嵌套的M3U8地址 (深度 {nested_info.get('depth', 0)}): {nested_url[:100]}...")
+                                    except Exception as e:
+                                        print(f"递归解析M3U8 URL时出错: {e}")
+                                        import traceback
+                                        traceback.print_exc()
+                                elif 'mp4' in content_type_lower:
+                                    video_type = 'MP4'
+                                elif 'webm' in content_type_lower:
+                                    video_type = 'WEBM'
+                                elif 'quicktime' in content_type_lower or 'mov' in content_type_lower:
+                                    video_type = 'MOV'
+                                else:
+                                    video_type = content_type.split('/')[1].upper() if '/' in content_type else 'VIDEO'
+                                break
+                        
+                        # 如果没有通过Content-Type识别，检查URL扩展名
+                        if not is_video:
+                            url_lower = response_url.lower()
+                            for ext in video_extensions:
+                                if ext in url_lower:
+                                    is_video = True
+                                    video_type = ext.replace('.', '').upper()
+                                    if ext == '.m3u8':
+                                        video_type = 'M3U8'
+                                        # 对于m3u8 URL，先添加到捕获列表
+                                        if response_url not in captured_urls:
+                                            captured_urls[response_url] = {
+                                                'type': video_type,
+                                                'content_type': content_type,
+                                                'source': 'response'
+                                            }
+                                            print(f"从响应中捕获M3U8 URL: {response_url[:100]}...")
+                                        
+                                        # 使用Playwright递归解析，提取所有嵌套的m3u8地址
+                                        try:
+                                            nested_urls = recursively_parse_m3u8_with_playwright(page, response_url)
+                                            for nested_info in nested_urls:
+                                                nested_url = nested_info['url']
+                                                if nested_url not in captured_urls:
+                                                    captured_urls[nested_url] = {
+                                                        'type': 'M3U8',
+                                                        'content_type': nested_info.get('content_type', 'application/vnd.apple.mpegurl'),
+                                                        'source': f"nested_{nested_info.get('depth', 0)}"
+                                                    }
+                                                    print(f"发现嵌套的M3U8地址 (深度 {nested_info.get('depth', 0)}): {nested_url[:100]}...")
+                                        except Exception as e:
+                                            print(f"递归解析M3U8 URL时出错: {e}")
+                                            import traceback
+                                            traceback.print_exc()
+                                    elif ext == '.ts':
+                                        video_type = 'TS'
+                                    break
+                        
+                        if is_video:
+                            # 如果URL已存在，更新content-type；否则添加新URL
+                            if response_url in captured_urls:
+                                captured_urls[response_url]['content_type'] = content_type
+                            else:
+                                captured_urls[response_url] = {
+                                    'type': video_type or 'VIDEO',
+                                    'content_type': content_type,
+                                    'source': 'response'
+                                }
+                            print(f"从响应中捕获视频URL: {response_url[:100]}... (类型: {video_type or 'VIDEO'}, Content-Type: {content_type})")
+                            
+                    except Exception as e:
+                        print(f"处理响应时出错: {e}")
+                
+                # 注册请求和响应处理器（必须在with块内，在页面关闭之前）
+                page.on("request", handle_request)
+                page.on("response", handle_response)
+            
+                # 过滤资源以加快加载并减少内存占用（只加载必要的资源）
+                def handle_route(route):
+                    """过滤资源，只加载必要的资源，减少内存占用"""
+                    resource_type = route.request.resource_type
+                    request_url = route.request.url.lower()
+                    
+                    # 允许文档、脚本、样式表、xhr、fetch、websocket、media（视频、音频）
+                    if resource_type in ['document', 'script', 'stylesheet', 'xhr', 'fetch', 'websocket', 'media']:
+                        route.continue_()
+                    # 阻止图片、字体等（减少内存占用）
+                    elif resource_type in ['image', 'font', 'texttrack', 'manifest', 'other']:
+                        route.abort()
+                    # 阻止大型资源文件
+                    elif any(ext in request_url for ext in ['.woff', '.woff2', '.ttf', '.eot', '.otf', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico']):
+                        route.abort()
+                    else:
+                        route.continue_()
+                
+                try:
+                    page.route("**/*", handle_route)
+                    print("已启用资源过滤以加快加载并减少内存占用")
+                except Exception as e:
+                    print(f"资源过滤启用失败: {e}，继续执行...")
+                
+                try:
+                    # 访问页面 - 使用更实用的等待策略，设置超时防止长时间占用资源
+                    print(f"正在访问页面: {url}")
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)  # 减少超时时间
+                    print("页面DOM加载完成")
+                    
+                    # 等待JavaScript执行（减少等待时间）
+                    time.sleep(2)  # 从3秒减少到2秒
+                    
+                    # 尝试关闭弹窗
+                    try:
+                        page.evaluate("""
+                            () => {
+                                // 关闭常见的弹窗
+                                const popups = document.querySelectorAll('.ds-pop, [class*="ds-pop"], .pop-overlay, .modal-overlay, .overlay, [class*="overlay"], .modal, .popup, [class*="modal"], [class*="popup"]');
+                                popups.forEach(popup => {
+                                    if (popup) {
+                                        popup.style.display = 'none';
+                                        popup.remove();
                                     }
-                                """)
-                                print("通过JavaScript点击播放按钮")
+                                });
+                                
+                                // 关闭通知
+                                const notices = document.querySelectorAll('#notice, [id*="notice"]');
+                                notices.forEach(notice => {
+                                    if (notice) {
+                                        notice.style.display = 'none';
+                                        notice.remove();
+                                    }
+                                });
+                                
+                                // 触发ESC键
+                                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27 }));
+                                document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', keyCode: 27 }));
+                            }
+                        """)
+                        print("已尝试关闭弹窗")
+                    except Exception as e:
+                        print(f"关闭弹窗时出错: {e}")
+                    
+                    # 尝试点击播放按钮
+                    try:
+                        play_button = page.query_selector('button[class*="play"], .play-button, [id*="play"], video')
+                        if play_button:
+                            print("找到播放按钮，尝试点击...")
+                            try:
+                                play_button.click(timeout=5000)
+                                print("播放按钮点击成功")
                                 time.sleep(2)
                             except:
-                                print("播放按钮点击失败，继续执行...")
-                    else:
-                        print("未找到播放按钮")
+                                # 如果普通点击失败，尝试强制点击
+                                try:
+                                    page.evaluate("""
+                                        () => {
+                                            const playBtn = document.querySelector('button[class*="play"], .play-button, [id*="play"], video');
+                                            if (playBtn) {
+                                                playBtn.click();
+                                            }
+                                        }
+                                    """)
+                                    print("通过JavaScript点击播放按钮")
+                                    time.sleep(2)
+                                except:
+                                    print("播放按钮点击失败，继续执行...")
+                        else:
+                            print("未找到播放按钮")
+                    except Exception as e:
+                        print(f"查找播放按钮失败: {e}")
+                    
+                    # 等待网络请求（减少等待时间）
+                    print("等待网络请求...")
+                    time.sleep(6)  # 从8秒减少到6秒
+                    
+                    # 获取页面标题
+                    try:
+                        page_title = page.title()
+                        print(f"获取到页面标题: {page_title}")
+                    except Exception as e:
+                        print(f"获取页面标题失败: {e}")
+                    
                 except Exception as e:
-                    print(f"查找播放按钮失败: {e}")
+                    print(f"访问页面失败: {e}")
+                finally:
+                    # 确保资源正确清理，防止内存泄漏（在with块内清理）
+                    try:
+                        if page:
+                            page.close()
+                            page = None
+                    except Exception as e:
+                        print(f"关闭页面时出错: {e}")
+                    
+                    try:
+                        if context:
+                            context.close()
+                            context = None
+                    except Exception as e:
+                        print(f"关闭上下文时出错: {e}")
+                    
+                    try:
+                        if browser:
+                            browser.close()
+                            browser = None
+                    except Exception as e:
+                        print(f"关闭浏览器时出错: {e}")
+                    
+                    # 强制垃圾回收（可选，帮助释放内存）
+                    gc.collect()
                 
-                # 等待网络请求
-                print("等待网络请求...")
-                time.sleep(8)
+                # 将捕获的URL转换为列表格式（在with块内）
+                for url_item, info in captured_urls.items():
+                    video_urls.append({
+                        'url': url_item,
+                        'type': info['type'],
+                        'content_type': info.get('content_type', ''),
+                        'source': info['source']
+                    })
                 
-                # 获取页面标题
-                try:
-                    page_title = page.title()
-                    print(f"获取到页面标题: {page_title}")
-                except Exception as e:
-                    print(f"获取页面标题失败: {e}")
-                
-            except Exception as e:
-                print(f"访问页面失败: {e}")
-            finally:
-                browser.close()
-            
-            # 将捕获的URL转换为列表格式（在with块内）
-            for url_item, info in captured_urls.items():
-                video_urls.append({
-                    'url': url_item,
-                    'type': info['type'],
-                    'content_type': info.get('content_type', ''),
-                    'source': info['source']
-                })
-            
-            print(f"共捕获到 {len(video_urls)} 个视频链接")
+                print(f"共捕获到 {len(video_urls)} 个视频链接")
+        except Exception as e:
+            print(f"浏览器操作失败: {e}")
+            import traceback
+            traceback.print_exc()
     except ImportError:
         print("Playwright未安装，无法获取视频链接")
         import traceback
@@ -771,7 +1386,7 @@ def parse_url():
             return jsonify({
                 'error': '未找到视频链接',
                 'title': page_title,
-                'suggestion': '视频链接可能通过JavaScript动态加载，请确保已安装playwright'
+                'suggestion': '视频链接可能通过JavaScript动态加载，请确保已安装playwright。如果内存不足，请检查浏览器配置。'
             }), 404
         
         return jsonify({
